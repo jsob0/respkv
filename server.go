@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
 
 const (
 	acceptRetryDelay = 100 * time.Millisecond
-	shutdownTimeout  = 5 * time.Second
+	idleTimeout      = 5 * time.Minute
+	writeTimeout     = 5 * time.Second
 )
 
 type Server struct {
@@ -64,22 +66,36 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		log.Printf("client disconnected: %s", conn.RemoteAddr())
 	}()
 
-	cancelDeadlines := context.AfterFunc(ctx, func() {
+	cancelReadInterrupt := context.AfterFunc(ctx, func() {
 		conn.SetReadDeadline(time.Now())
-		conn.SetWriteDeadline(time.Now().Add(shutdownTimeout))
 	})
-	defer cancelDeadlines()
+	defer cancelReadInterrupt()
 
 	log.Printf("client connected: %s", conn.RemoteAddr())
 
 	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
+	for {
+		conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		if ctx.Err() != nil {
+			return
+		}
+		if !scanner.Scan() {
+			break
+		}
+
+		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if _, err := fmt.Fprintln(conn, scanner.Text()); err != nil {
 			log.Printf("write to %s: %v", conn.RemoteAddr(), err)
 			return
 		}
 	}
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+
+	err := scanner.Err()
+	switch {
+	case err == nil || ctx.Err() != nil:
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		log.Printf("idle timeout: %s", conn.RemoteAddr())
+	default:
 		log.Printf("read from %s: %v", conn.RemoteAddr(), err)
 	}
 }
