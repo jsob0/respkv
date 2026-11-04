@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -19,11 +19,12 @@ const (
 )
 
 type Server struct {
-	addr string
+	addr   string
+	logger *slog.Logger
 }
 
-func NewServer(addr string) *Server {
-	return &Server{addr: addr}
+func NewServer(addr string, logger *slog.Logger) *Server {
+	return &Server{addr: addr, logger: logger}
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -41,16 +42,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
-	log.Printf("listening on %s", listener.Addr())
+	s.logger.Info("server listening", "addr", listener.Addr().String())
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				log.Printf("shutting down, waiting for active connections")
+				s.logger.Info("server shutting down")
 				return nil
 			}
-			log.Printf("accept: %v", err)
+			s.logger.Error("accept failed", "err", err)
 			time.Sleep(acceptRetryDelay)
 			continue
 		}
@@ -61,9 +62,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
+	logger := s.logger.With("remote_addr", conn.RemoteAddr().String())
+
 	defer func() {
 		conn.Close()
-		log.Printf("client disconnected: %s", conn.RemoteAddr())
+		logger.Info("client disconnected")
 	}()
 
 	cancelReadInterrupt := context.AfterFunc(ctx, func() {
@@ -71,7 +74,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	})
 	defer cancelReadInterrupt()
 
-	log.Printf("client connected: %s", conn.RemoteAddr())
+	logger.Info("client connected")
 
 	scanner := bufio.NewScanner(conn)
 	for {
@@ -85,7 +88,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if _, err := fmt.Fprintln(conn, scanner.Text()); err != nil {
-			log.Printf("write to %s: %v", conn.RemoteAddr(), err)
+			logger.Warn("write failed", "err", err)
 			return
 		}
 	}
@@ -94,8 +97,8 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	switch {
 	case err == nil || ctx.Err() != nil:
 	case errors.Is(err, os.ErrDeadlineExceeded):
-		log.Printf("idle timeout: %s", conn.RemoteAddr())
+		logger.Info("idle timeout")
 	default:
-		log.Printf("read from %s: %v", conn.RemoteAddr(), err)
+		logger.Warn("read failed", "err", err)
 	}
 }
