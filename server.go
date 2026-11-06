@@ -13,18 +13,25 @@ import (
 )
 
 const (
-	acceptRetryDelay = 100 * time.Millisecond
-	idleTimeout      = 5 * time.Minute
-	writeTimeout     = 5 * time.Second
+	acceptRetryDelay    = 100 * time.Millisecond
+	defaultIdleTimeout  = 5 * time.Minute
+	defaultWriteTimeout = 5 * time.Second
 )
 
 type Server struct {
-	addr   string
-	logger *slog.Logger
+	addr         string
+	logger       *slog.Logger
+	idleTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
-	return &Server{addr: addr, logger: logger}
+	return &Server{
+		addr:         addr,
+		logger:       logger,
+		idleTimeout:  defaultIdleTimeout,
+		writeTimeout: defaultWriteTimeout,
+	}
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -32,6 +39,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+	return s.Serve(ctx, listener)
+}
+
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
 	cancelListenerClose := context.AfterFunc(ctx, func() {
@@ -78,7 +89,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	scanner := bufio.NewScanner(conn)
 	for {
-		conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		conn.SetReadDeadline(time.Now().Add(s.idleTimeout))
 		if ctx.Err() != nil {
 			return
 		}
@@ -86,7 +97,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			break
 		}
 
-		conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 		if _, err := fmt.Fprintln(conn, scanner.Text()); err != nil {
 			logger.Warn("write failed", "err", err)
 			return
