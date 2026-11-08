@@ -4,13 +4,15 @@
 
 A Redis-inspired key-value store in Go, built from the TCP layer up.
 
-> **Status: early development.** The server currently handles the `PING` and
-> `ECHO` commands over a simple line-based text protocol. Storage and the RESP
-> protocol are planned; see the [roadmap](#roadmap).
+> **Status: early development.** The server keeps data in memory and handles the
+> `PING`, `ECHO`, `SET`, `GET` and `DEL` commands over a simple line-based text
+> protocol. Key expiration, the RESP protocol and persistence are planned; see
+> the [roadmap](#roadmap).
 
 ## Features
 
-- Line-based text protocol with case-insensitive `PING` and `ECHO` commands
+- In-memory key-value store shared by all clients and safe for concurrent use
+- Line-based text protocol with case-insensitive command names
 - Only complete lines are executed, so a command cut off by a disconnect or
   timeout is discarded
 - Concurrent client handling, one goroutine per connection
@@ -42,6 +44,14 @@ ping hello
 hello
 ECHO hi
 hi
+SET name respkv
+OK
+GET name
+respkv
+DEL name other
+1
+GET name
+(nil)
 ECHO
 ERR wrong number of arguments for 'echo' command
 FOO
@@ -60,14 +70,18 @@ stderr as JSON:
 
 ### Commands
 
-| Command          | Reply                                    |
-|------------------|------------------------------------------|
-| `PING`           | `PONG`                                   |
-| `PING <message>` | `<message>`                              |
-| `ECHO <message>` | `<message>`                              |
+| Command              | Reply                                 |
+|----------------------|---------------------------------------|
+| `PING`               | `PONG`                                |
+| `PING <message>`     | `<message>`                           |
+| `ECHO <message>`     | `<message>`                           |
+| `SET <key> <value>`  | `OK`                                  |
+| `GET <key>`          | The value, or `(nil)` if there is none |
+| `DEL <key> [key...]` | Number of keys removed                |
 
-Arguments are separated by whitespace, so a message cannot contain spaces yet.
-Errors are returned as a line starting with `ERR`.
+Arguments are separated by whitespace, so keys and values cannot contain spaces
+yet. A stored value of `(nil)` looks the same as a missing key. Data is lost
+when the server stops. Errors are returned as a line starting with `ERR`.
 
 ### Options
 
@@ -84,9 +98,10 @@ By default the server only accepts connections from the local machine. Use
 go test -race ./...
 ```
 
-Unit tests cover command parsing and replies. Integration tests start a real
-server on a random port and talk to it over TCP. They cover commands, lines
-split across writes, incomplete lines, concurrent clients, timeouts, the line
+Unit tests cover command parsing and replies, as well as the store, including
+concurrent access. Integration tests start a real server on a random port and
+talk to it over TCP. They cover commands, lines split across writes, incomplete
+lines, concurrent clients, data shared between clients, timeouts, the line
 length limit and graceful shutdown.
 
 ## Roadmap
@@ -95,7 +110,8 @@ length limit and graceful shutdown.
 - [x] Graceful shutdown, timeouts and structured logging
 - [x] Integration tests and CI
 - [x] Text commands: `PING`, `ECHO`
-- [ ] Storage: `SET`, `GET`, `DEL` and key expiration (TTL)
+- [x] In-memory storage: `SET`, `GET`, `DEL`
+- [ ] Key expiration (TTL)
 - [ ] RESP protocol, compatible with `redis-cli`
 - [ ] Persistence with an append-only file
 - [ ] Metrics, profiling and benchmarks

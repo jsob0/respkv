@@ -24,6 +24,7 @@ type Server struct {
 	logger       *slog.Logger
 	idleTimeout  time.Duration
 	writeTimeout time.Duration
+	store        *Store
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
@@ -32,6 +33,7 @@ func NewServer(addr string, logger *slog.Logger) *Server {
 		logger:       logger,
 		idleTimeout:  defaultIdleTimeout,
 		writeTimeout: defaultWriteTimeout,
+		store:        NewStore(),
 	}
 }
 
@@ -99,7 +101,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			break
 		}
 
-		reply := execute(scanner.Text())
+		reply := execute(s.store, scanner.Text())
 
 		conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 		if _, err := fmt.Fprintln(conn, reply); err != nil {

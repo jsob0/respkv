@@ -161,6 +161,14 @@ func TestClientsAreHandledConcurrently(t *testing.T) {
 	}
 }
 
+func TestClientsShareStore(t *testing.T) {
+	addr, _ := startServer(t, newTestServer())
+	first, second := dial(t, addr), dial(t, addr)
+
+	assertReply(t, first, "SET name jakub\n", "OK\n")
+	assertReply(t, second, "GET name\n", "jakub\n")
+}
+
 func TestIdleClientIsDisconnected(t *testing.T) {
 	s := newTestServer()
 	s.idleTimeout = 50 * time.Millisecond
