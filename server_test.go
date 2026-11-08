@@ -68,7 +68,7 @@ func dial(t *testing.T, addr string) net.Conn {
 	return conn
 }
 
-func assertEcho(t *testing.T, conn net.Conn, input, want string) {
+func assertReply(t *testing.T, conn net.Conn, input, want string) {
 	t.Helper()
 
 	if _, err := io.WriteString(conn, input); err != nil {
@@ -109,37 +109,42 @@ func isConnectionClosed(err error) bool {
 		errors.Is(err, syscall.EPIPE)
 }
 
-func TestEcho(t *testing.T) {
-	longestLine := strings.Repeat("a", 64*1024-1) + "\n"
+func TestCommands(t *testing.T) {
+	maxArgumentSize := 64*1024 - 6
 
 	tests := []struct {
 		name  string
 		input string
 		want  string
 	}{
-		{name: "single line", input: "hello\n", want: "hello\n"},
-		{name: "multiple lines", input: "one\ntwo\n", want: "one\ntwo\n"},
-		{name: "empty line", input: "\n", want: "\n"},
-		{name: "windows line ending", input: "hello\r\n", want: "hello\n"},
-		{name: "longest allowed line", input: longestLine, want: longestLine},
+		{name: "single line", input: "PING\n", want: "PONG\n"},
+		{name: "multiple lines", input: "PING\nECHO hello\n", want: "PONG\nhello\n"},
+		{name: "empty line", input: "\n", want: "ERR empty command\n"},
+		{name: "windows line ending", input: "PING\r\n", want: "PONG\n"},
+		{name: "unknown command", input: "FOO\n", want: "ERR unknown command 'FOO'\n"},
+		{
+			name:  "longest allowed line",
+			input: "ECHO " + strings.Repeat("a", maxArgumentSize) + "\n",
+			want:  strings.Repeat("a", maxArgumentSize) + "\n",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			addr, _ := startServer(t, newTestServer())
-			assertEcho(t, dial(t, addr), tt.input, tt.want)
+			assertReply(t, dial(t, addr), tt.input, tt.want)
 		})
 	}
 }
 
-func TestEchoLineSplitAcrossWrites(t *testing.T) {
+func TestLineSplitAcrossWrites(t *testing.T) {
 	addr, _ := startServer(t, newTestServer())
 	conn := dial(t, addr)
 
-	if _, err := io.WriteString(conn, "Hel"); err != nil {
+	if _, err := io.WriteString(conn, "PI"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	assertEcho(t, conn, "lo\n", "Hello\n")
+	assertReply(t, conn, "NG\n", "PONG\n")
 }
 
 func TestClientsAreHandledConcurrently(t *testing.T) {
@@ -152,7 +157,7 @@ func TestClientsAreHandledConcurrently(t *testing.T) {
 
 	// The last client would never get a reply if earlier connections blocked it.
 	for i := len(conns) - 1; i >= 0; i-- {
-		assertEcho(t, conns[i], "ping\n", "ping\n")
+		assertReply(t, conns[i], "PING\n", "PONG\n")
 	}
 }
 
@@ -168,7 +173,7 @@ func TestShutdownDisconnectsClientsAndStopsListening(t *testing.T) {
 	addr, stop := startServer(t, newTestServer())
 	conn := dial(t, addr)
 	// Make sure the connection is being handled before shutting down.
-	assertEcho(t, conn, "ping\n", "ping\n")
+	assertReply(t, conn, "PING\n", "PONG\n")
 
 	if err := stop(); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -212,5 +217,45 @@ func TestClientNotReadingIsDisconnected(t *testing.T) {
 			t.Errorf("write error = %v, want connection closed", err)
 		}
 		return
+	}
+}
+
+func TestIncompleteLineIsNotExecutedOnHalfClose(t *testing.T) {
+	addr, _ := startServer(t, newTestServer())
+	conn := dial(t, addr)
+
+	if _, err := io.WriteString(conn, "PING"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("close write: %v", err)
+	}
+
+	got, err := io.ReadAll(conn)
+	if len(got) > 0 {
+		t.Errorf("server responded with: %q", string(got))
+	}
+	if err != nil {
+		t.Errorf("read: %v", err)
+	}
+}
+
+func TestIncompleteLineIsNotExecutedOnIdleTimeout(t *testing.T) {
+	s := newTestServer()
+	s.idleTimeout = 50 * time.Millisecond
+	addr, _ := startServer(t, s)
+	conn := dial(t, addr)
+
+	if _, err := io.WriteString(conn, "PING"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := io.ReadAll(conn)
+	if len(got) > 0 {
+		t.Errorf("server responded with: %q", string(got))
+	}
+	if err != nil {
+		t.Errorf("read: %v", err)
 	}
 }

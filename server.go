@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -88,6 +89,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	logger.Info("client connected")
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Split(scanCompleteLines)
 	for {
 		conn.SetReadDeadline(time.Now().Add(s.idleTimeout))
 		if ctx.Err() != nil {
@@ -97,8 +99,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			break
 		}
 
+		reply := execute(scanner.Text())
+
 		conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
-		if _, err := fmt.Fprintln(conn, scanner.Text()); err != nil {
+		if _, err := fmt.Fprintln(conn, reply); err != nil {
 			logger.Warn("write failed", "err", err)
 			return
 		}
@@ -112,4 +116,11 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	default:
 		logger.Warn("read failed", "err", err)
 	}
+}
+
+func scanCompleteLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if bytes.IndexByte(data, '\n') < 0 {
+		return 0, nil, nil
+	}
+	return bufio.ScanLines(data, atEOF)
 }
