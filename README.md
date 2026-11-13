@@ -5,13 +5,15 @@
 A Redis-inspired key-value store in Go, built from the TCP layer up.
 
 > **Status: early development.** The server keeps data in memory and handles the
-> `PING`, `ECHO`, `SET`, `GET` and `DEL` commands over a simple line-based text
-> protocol. Key expiration, the RESP protocol and persistence are planned; see
+> `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXPIRE` and `TTL` commands over a simple
+> line-based text protocol. The RESP protocol and persistence are planned; see
 > the [roadmap](#roadmap).
 
 ## Features
 
 - In-memory key-value store shared by all clients and safe for concurrent use
+- Key expiration: expired keys are hidden as soon as they expire and removed
+  from memory by a background task every second
 - Line-based text protocol with case-insensitive command names
 - Only complete lines are executed, so a command cut off by a disconnect or
   timeout is discarded
@@ -48,10 +50,18 @@ SET name respkv
 OK
 GET name
 respkv
+TTL name
+-1
+EXPIRE name 60
+1
+TTL name
+60
 DEL name other
 1
 GET name
 (nil)
+TTL name
+-2
 ECHO
 ERR wrong number of arguments for 'echo' command
 FOO
@@ -70,14 +80,19 @@ stderr as JSON:
 
 ### Commands
 
-| Command              | Reply                                 |
-|----------------------|---------------------------------------|
-| `PING`               | `PONG`                                |
-| `PING <message>`     | `<message>`                           |
-| `ECHO <message>`     | `<message>`                           |
-| `SET <key> <value>`  | `OK`                                  |
-| `GET <key>`          | The value, or `(nil)` if there is none |
-| `DEL <key> [key...]` | Number of keys removed                |
+| Command                  | Reply                                                                      |
+|--------------------------|----------------------------------------------------------------------------|
+| `PING`                   | `PONG`                                                                     |
+| `PING <message>`         | `<message>`                                                                |
+| `ECHO <message>`         | `<message>`                                                                |
+| `SET <key> <value>`      | `OK`, and any expiration on the key is cleared                             |
+| `GET <key>`              | The value, or `(nil)` if there is none                                     |
+| `DEL <key> [key...]`     | Number of keys removed                                                     |
+| `EXPIRE <key> <seconds>` | `1` if the timeout was set, `0` if the key does not exist                  |
+| `TTL <key>`              | Seconds left, `-1` if the key has no expiration, `-2` if it does not exist |
+
+`EXPIRE` with zero or a negative number of seconds deletes the key. `TTL` rounds
+up to whole seconds.
 
 Arguments are separated by whitespace, so keys and values cannot contain spaces
 yet. A stored value of `(nil)` looks the same as a missing key. Data is lost
@@ -99,10 +114,12 @@ go test -race ./...
 ```
 
 Unit tests cover command parsing and replies, as well as the store, including
-concurrent access. Integration tests start a real server on a random port and
-talk to it over TCP. They cover commands, lines split across writes, incomplete
-lines, concurrent clients, data shared between clients, timeouts, the line
-length limit and graceful shutdown.
+concurrent access. Expiration unit tests use a fake clock or `testing/synctest`,
+so they do not wait in real time. Integration tests start a real server on a
+random port and talk to it over TCP. They cover commands, lines split across
+writes, incomplete lines, concurrent clients, data shared between clients,
+background removal of expired keys, timeouts, the line length limit and graceful
+shutdown.
 
 ## Roadmap
 
@@ -111,7 +128,7 @@ length limit and graceful shutdown.
 - [x] Integration tests and CI
 - [x] Text commands: `PING`, `ECHO`
 - [x] In-memory storage: `SET`, `GET`, `DEL`
-- [ ] Key expiration (TTL)
+- [x] Key expiration (TTL)
 - [ ] RESP protocol, compatible with `redis-cli`
 - [ ] Persistence with an append-only file
 - [ ] Metrics, profiling and benchmarks
