@@ -14,26 +14,29 @@ import (
 )
 
 const (
-	acceptRetryDelay    = 100 * time.Millisecond
-	defaultIdleTimeout  = 5 * time.Minute
-	defaultWriteTimeout = 5 * time.Second
+	acceptRetryDelay      = 100 * time.Millisecond
+	defaultIdleTimeout    = 5 * time.Minute
+	defaultWriteTimeout   = 5 * time.Second
+	defaultExpireInterval = time.Second
 )
 
 type Server struct {
-	addr         string
-	logger       *slog.Logger
-	idleTimeout  time.Duration
-	writeTimeout time.Duration
-	store        *Store
+	addr           string
+	logger         *slog.Logger
+	idleTimeout    time.Duration
+	writeTimeout   time.Duration
+	store          *Store
+	expireInterval time.Duration
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
 	return &Server{
-		addr:         addr,
-		logger:       logger,
-		idleTimeout:  defaultIdleTimeout,
-		writeTimeout: defaultWriteTimeout,
-		store:        NewStore(),
+		addr:           addr,
+		logger:         logger,
+		idleTimeout:    defaultIdleTimeout,
+		writeTimeout:   defaultWriteTimeout,
+		store:          NewStore(),
+		expireInterval: defaultExpireInterval,
 	}
 }
 
@@ -55,6 +58,10 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
+
+	wg.Go(func() {
+		s.store.RunExpiration(ctx, s.expireInterval)
+	})
 
 	s.logger.Info("server listening", "addr", listener.Addr().String())
 

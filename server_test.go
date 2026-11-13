@@ -169,6 +169,29 @@ func TestClientsShareStore(t *testing.T) {
 	assertReply(t, second, "GET name\n", "jakub\n")
 }
 
+func TestServerRemovesExpiredKeys(t *testing.T) {
+	s := newTestServer()
+	s.expireInterval = time.Millisecond
+	s.store.data["key"] = entry{value: "value", expiresAt: time.Unix(1, 0)}
+	startServer(t, s)
+
+	deadline := time.Now().Add(testTimeout)
+	for {
+		s.store.mu.RLock()
+		n := len(s.store.data)
+		s.store.mu.RUnlock()
+
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("stored keys = %d, want 0", n)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestIdleClientIsDisconnected(t *testing.T) {
 	s := newTestServer()
 	s.idleTimeout = 50 * time.Millisecond

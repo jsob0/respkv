@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -88,6 +89,35 @@ func (s *Store) TTL(key string) (remaining time.Duration, hasExpiry, ok bool) {
 		return 0, false, true
 	}
 	return e.expiresAt.Sub(now), true, true
+}
+
+func (s *Store) DeleteExpired() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	deleted := 0
+	for key, e := range s.data {
+		if e.expired(now) {
+			delete(s.data, key)
+			deleted++
+		}
+	}
+	return deleted
+}
+
+func (s *Store) RunExpiration(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.DeleteExpired()
+		}
+	}
 }
 
 func (s *Store) getLocked(key string, now time.Time) (entry, bool) {

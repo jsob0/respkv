@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -245,5 +248,71 @@ func TestTTL(t *testing.T) {
 					remaining, hasExpiry, ok, tt.wantRemaining, tt.wantHasExpiry, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestDeleteExpired(t *testing.T) {
+	s, advance := newStoreWithClock()
+
+	s.Set("alive", "value")
+	s.Expire("alive", 30*time.Second)
+	s.Set("persistent", "value")
+	s.Set("expired", "value")
+	s.Expire("expired", 10*time.Second)
+	s.Set("expires-now", "value")
+	s.Expire("expires-now", 20*time.Second)
+
+	advance(20 * time.Second)
+
+	if got := s.DeleteExpired(); got != 2 {
+		t.Errorf("DeleteExpired() = %d, want 2", got)
+	}
+	assertStoredKeys(t, s, "alive", "persistent")
+}
+
+func TestRunExpiration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := NewStore()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			s.RunExpiration(ctx, time.Second)
+			close(done)
+		}()
+
+		s.Set("first", "value")
+		s.Expire("first", 2*time.Second)
+		s.Set("second", "value")
+		s.Expire("second", 5*time.Second)
+		s.Set("persistent", "value")
+
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		assertStoredKeys(t, s, "persistent", "second")
+
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		assertStoredKeys(t, s, "persistent")
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			t.Error("RunExpiration did not return after cancel")
+		}
+	})
+}
+
+// assertStoredKeys checks the map itself, since Get hides expired keys anyway.
+func assertStoredKeys(t *testing.T, s *Store, want ...string) {
+	t.Helper()
+
+	s.mu.RLock()
+	got := slices.Sorted(maps.Keys(s.data))
+	s.mu.RUnlock()
+
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("stored keys = %q, want %q", got, want)
 	}
 }
