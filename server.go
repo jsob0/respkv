@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -97,39 +97,51 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 
 	logger.Info("client connected")
 
-	scanner := bufio.NewScanner(conn)
-	scanner.Split(scanCompleteLines)
+	reader := newCommandReader(conn)
+	writer := bufio.NewWriter(conn)
 	for {
 		conn.SetReadDeadline(time.Now().Add(s.idleTimeout))
 		if ctx.Err() != nil {
 			return
 		}
-		if !scanner.Scan() {
-			break
+
+		args, err := readCommand(reader)
+		if err != nil {
+			if errors.Is(err, errProtocol) {
+				conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+				writer.Write(errorReply("ERR " + err.Error()).encode())
+				writer.Flush()
+			}
+			logReadError(ctx, logger, err)
+			return
 		}
 
-		reply := execute(s.store, scanner.Text())
+		r := execute(s.store, args)
 
 		conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
-		if _, err := fmt.Fprintln(conn, reply); err != nil {
+		if _, err := writer.Write(r.encode()); err != nil {
 			logger.Warn("write failed", "err", err)
 			return
 		}
+		if reader.Buffered() == 0 {
+			if err := writer.Flush(); err != nil {
+				logger.Warn("write failed", "err", err)
+				return
+			}
+		}
 	}
+}
 
-	err := scanner.Err()
+func logReadError(ctx context.Context, logger *slog.Logger, err error) {
 	switch {
-	case err == nil || ctx.Err() != nil:
+	case errors.Is(err, io.EOF), ctx.Err() != nil:
+	case errors.Is(err, errProtocol):
+		logger.Warn("protocol error", "err", err)
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		logger.Info("client disconnected mid-command")
 	case errors.Is(err, os.ErrDeadlineExceeded):
 		logger.Info("idle timeout")
 	default:
 		logger.Warn("read failed", "err", err)
 	}
-}
-
-func scanCompleteLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if bytes.IndexByte(data, '\n') < 0 {
-		return 0, nil, nil
-	}
-	return bufio.ScanLines(data, atEOF)
 }
