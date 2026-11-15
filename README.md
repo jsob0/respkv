@@ -1,41 +1,73 @@
 # respkv
 
 [![CI](https://github.com/jsob0/respkv/actions/workflows/ci.yml/badge.svg)](https://github.com/jsob0/respkv/actions/workflows/ci.yml)
+[![Go version](https://img.shields.io/github/go-mod/go-version/jsob0/respkv)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A Redis-inspired key-value store in Go, built from the TCP layer up.
 
-> **Status: early development.** The server handles the `PING`, `ECHO`, `SET`,
-> `GET`, `DEL`, `EXPIRE`, `PEXPIREAT` and `TTL` commands over the Redis protocol
-> (RESP), so it works with `redis-cli`, and can persist data to an append-only
-> file. Metrics and benchmarks are next; see the [roadmap](#roadmap).
+respkv speaks the Redis protocol (RESP), so `redis-cli`, `redis-benchmark` and
+Redis client libraries work with it. It keeps data in memory with key
+expiration, can persist it to an append-only file, accepts TLS connections and
+exposes Prometheus metrics. Apart from the Prometheus client, it uses only the
+Go standard library.
+
+Supported commands: `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXPIRE`, `PEXPIREAT`
+and `TTL`.
+
+## Contents
+
+- [Features](#features)
+- [Getting started](#getting-started)
+- [Commands](#commands)
+- [Options](#options)
+- [Docker](#docker)
+- [Persistence](#persistence)
+- [TLS](#tls)
+- [Metrics and profiling](#metrics-and-profiling)
+- [Performance](#performance)
+- [Design](#design)
+- [Testing](#testing)
+- [Roadmap](#roadmap)
 
 ## Features
 
-- In-memory key-value store shared by all clients and safe for concurrent use
+Protocol:
+
+- RESP2: commands as arrays of bulk strings, as sent by `redis-cli` and Redis
+  client libraries, plus inline commands typed by hand
+- Pipelining: replies are buffered and sent together once all received commands
+  have been handled
+- Case-insensitive command names; keys and values can hold any bytes, including
+  spaces and line breaks
+- Only complete commands are executed, so a command cut off by a disconnect or
+  timeout is discarded
+- A malformed command gets an error reply and the connection is closed
+- Limits: 1024 arguments per command, 1 MiB per argument and 64 KiB per inline
+  command, including the newline
+
+Storage:
+
+- In-memory key-value store shared by all clients and safe for concurrent use,
+  with one goroutine per connection
 - Key expiration: expired keys are hidden as soon as they expire and removed
   from memory by a background task every second
 - Optional persistence with an append-only file (AOF), replayed on startup, with
   the `always`, `everysec` and `no` fsync policies known from Redis
-- RESP2 protocol: commands as arrays of bulk strings, as sent by `redis-cli`
-  and Redis client libraries, plus inline commands typed by hand
-- Case-insensitive command names; keys and values can hold any bytes, including
-  spaces and line breaks
-- Pipelining: replies are buffered and sent together once all received commands
-  have been handled
-- Only complete commands are executed, so a command cut off by a disconnect or
-  timeout is discarded
-- A malformed command gets an error reply and the connection is closed
-- Concurrent client handling, one goroutine per connection
+
+Operations:
+
 - Graceful shutdown on `SIGINT` and `SIGTERM`: stops accepting new connections
   and waits for active ones to finish
 - Idle timeout (5 minutes) and write timeout (5 seconds), so slow or silent
   clients cannot hold a connection forever
-- Limits: 1024 arguments per command, 1 MiB per argument and 64 KiB per inline
-  command, including the newline
-- Structured JSON logging with `log/slog`
 - Optional TLS, compatible with `redis-cli --tls`
 - Optional Prometheus metrics and `pprof` profiling on a separate HTTP port
-- Unit and integration tests run with the race detector in CI
+- Structured JSON logging with `log/slog`
+- Docker image with a static binary on a distroless base, running as a non-root
+  user
+- Unit, integration and fuzz tests; CI runs them with the race detector and
+  checks the Docker image
 
 ## Getting started
 
@@ -45,6 +77,13 @@ Requires Go 1.27 or later.
 git clone git@github.com:jsob0/respkv.git
 cd respkv
 go run .
+```
+
+Or with Docker, without installing Go (see [Docker](#docker)):
+
+```bash
+docker build -t respkv .
+docker run --rm -p 127.0.0.1:9000:6379 respkv
 ```
 
 In another terminal, connect with `redis-cli`. If it is not installed, run it
@@ -102,10 +141,46 @@ stderr as JSON:
 {"time":"2026-11-06T18:41:41.634610905+01:00","level":"INFO","msg":"server shutting down"}
 ```
 
-### Docker
+## Commands
 
-The image is built from a static binary on a distroless base, about 22 MB, and
-runs as a non-root user. By default it listens on port 6379 and keeps the
+| Command                  | Reply                                                                               |
+|--------------------------|-------------------------------------------------------------------------------------|
+| `PING`                   | Simple string `PONG`                                                                |
+| `PING <message>`         | Bulk string `<message>`                                                             |
+| `ECHO <message>`         | Bulk string `<message>`                                                             |
+| `SET <key> <value>`      | Simple string `OK`; any expiration on the key is cleared                            |
+| `GET <key>`              | Bulk string with the value, or a null bulk string if there is none                  |
+| `DEL <key> [key...]`     | Integer: number of keys removed                                                     |
+| `EXPIRE <key> <seconds>` | Integer: `1` if the timeout was set, `0` if the key does not exist                  |
+| `PEXPIREAT <key> <ms>`   | Like `EXPIRE`, but with an absolute Unix time in milliseconds                       |
+| `TTL <key>`              | Integer: seconds left, `-1` if the key has no expiration, `-2` if it does not exist |
+
+`SET` takes no options such as `EX` or `NX`; use `EXPIRE` to set a timeout.
+`EXPIRE` with zero or a negative number of seconds, and `PEXPIREAT` with a time
+in the past, delete the key. `TTL` rounds up to whole seconds.
+
+Errors are returned as RESP errors starting with `ERR`. Empty inline commands
+are ignored, as in Redis. Without `-aof`, data is lost when the server stops.
+
+## Options
+
+| Flag            | Default          | Description                                                      |
+|-----------------|------------------|------------------------------------------------------------------|
+| `-addr`         | `127.0.0.1:9000` | TCP address to listen on                                         |
+| `-aof`          | empty            | Append-only file path; empty disables persistence                |
+| `-appendfsync`  | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
+| `-metrics-addr` | empty            | HTTP address for metrics and `pprof`; empty disables it          |
+| `-tls-cert`     | empty            | TLS certificate file (PEM); enables TLS together with `-tls-key` |
+| `-tls-key`      | empty            | TLS private key file (PEM)                                       |
+
+By default the server only accepts connections from the local machine. Use
+`-addr :9000` to listen on all interfaces.
+
+## Docker
+
+The image is built in two stages: a static binary compiled in the `golang`
+image is copied onto a distroless base. The result is about 22 MB and runs as a
+non-root user. By default the server listens on port 6379 and keeps the
 append-only file in the `/data` volume:
 
 ```bash
@@ -128,40 +203,6 @@ docker run -d -p 127.0.0.1:6379:6379 -p 127.0.0.1:9100:9100 \
 The server runs as UID 65532, so the key file must be readable by that user,
 for example with `chmod 644 key.pem` for a local test certificate. On systems
 with SELinux, add `,z` to the volume options.
-
-### Commands
-
-| Command                  | Reply                                                                               |
-|--------------------------|-------------------------------------------------------------------------------------|
-| `PING`                   | Simple string `PONG`                                                                |
-| `PING <message>`         | Bulk string `<message>`                                                             |
-| `ECHO <message>`         | Bulk string `<message>`                                                             |
-| `SET <key> <value>`      | Simple string `OK`; any expiration on the key is cleared                            |
-| `GET <key>`              | Bulk string with the value, or a null bulk string if there is none                  |
-| `DEL <key> [key...]`     | Integer: number of keys removed                                                     |
-| `EXPIRE <key> <seconds>` | Integer: `1` if the timeout was set, `0` if the key does not exist                  |
-| `PEXPIREAT <key> <ms>`   | Like `EXPIRE`, but with an absolute Unix time in milliseconds                       |
-| `TTL <key>`              | Integer: seconds left, `-1` if the key has no expiration, `-2` if it does not exist |
-
-`EXPIRE` with zero or a negative number of seconds, and `PEXPIREAT` with a time
-in the past, delete the key. `TTL` rounds up to whole seconds.
-
-Errors are returned as RESP errors starting with `ERR`. Empty inline commands
-are ignored, as in Redis. Without `-aof`, data is lost when the server stops.
-
-### Options
-
-| Flag            | Default          | Description                                                      |
-|-----------------|------------------|------------------------------------------------------------------|
-| `-addr`         | `127.0.0.1:9000` | TCP address to listen on                                         |
-| `-aof`          | empty            | Append-only file path; empty disables persistence                |
-| `-appendfsync`  | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
-| `-metrics-addr` | empty            | HTTP address for metrics and `pprof`; empty disables it          |
-| `-tls-cert`     | empty            | TLS certificate file (PEM); enables TLS together with `-tls-key` |
-| `-tls-key`      | empty            | TLS private key file (PEM)                                       |
-
-By default the server only accepts connections from the local machine. Use
-`-addr :9000` to listen on all interfaces.
 
 ## Persistence
 
@@ -307,6 +348,27 @@ parallel load, append-only file writes and the whole server over TCP:
 go test -run '^$' -bench . -benchmem
 ```
 
+## Design
+
+All code is in one `main` package:
+
+| File          | Responsibility                                                         |
+|---------------|------------------------------------------------------------------------|
+| `main.go`     | Flags, logger and signal handling                                      |
+| `server.go`   | Listener, one goroutine per connection, timeouts and graceful shutdown |
+| `resp.go`     | RESP parser and reply encoding                                         |
+| `commands.go` | Command table and argument checks                                      |
+| `store.go`    | Map behind a `sync.RWMutex`, key expiration and the AOF hook           |
+| `aof.go`      | Append-only file writer, fsync policies and replay on startup          |
+| `metrics.go`  | Prometheus metrics and `pprof` handlers                                |
+| `tls.go`      | TLS configuration                                                      |
+
+The path of a command: the connection goroutine reads it with a
+`bufio.Reader`, looks it up in the command table and runs it against the store.
+Changes are applied and appended to the append-only file under the store lock.
+The reply goes to a `bufio.Writer`, which is flushed once no more input is
+buffered, after the append-only file has been handed to the operating system.
+
 ## Testing
 
 ```bash
@@ -347,6 +409,9 @@ go test -fuzz=FuzzReadCommandRoundTrip -fuzztime=30s
 - [x] Persistence with an append-only file
 - [x] Metrics, profiling and benchmarks
 - [x] Docker image and TLS
+- [ ] Rewriting the append-only file to a compact form
+- [ ] More commands, such as `INCR`, `EXISTS` and `MGET`
+- [ ] Quoted arguments in inline commands
 
 ## License
 
