@@ -33,6 +33,7 @@ A Redis-inspired key-value store in Go, built from the TCP layer up.
 - Limits: 1024 arguments per command, 1 MiB per argument and 64 KiB per inline
   command, including the newline
 - Structured JSON logging with `log/slog`
+- Optional TLS, compatible with `redis-cli --tls`
 - Optional Prometheus metrics and `pprof` profiling on a separate HTTP port
 - Unit and integration tests run with the race detector in CI
 
@@ -129,6 +130,8 @@ are ignored, as in Redis. Without `-aof`, data is lost when the server stops.
 | `-aof`          | empty            | Append-only file path; empty disables persistence                |
 | `-appendfsync`  | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
 | `-metrics-addr` | empty            | HTTP address for metrics and `pprof`; empty disables it          |
+| `-tls-cert`     | empty            | TLS certificate file (PEM); enables TLS together with `-tls-key` |
+| `-tls-key`      | empty            | TLS private key file (PEM)                                       |
 
 By default the server only accepts connections from the local machine. Use
 `-addr :9000` to listen on all interfaces.
@@ -187,6 +190,26 @@ How it works:
 Checked by hand: 10,000 `SET` commands loaded with `redis-cli --pipe` and the
 server killed with `kill -9` right after the last reply. All 10,000 keys were
 back after a restart with each fsync policy.
+
+## TLS
+
+Pass a certificate and its private key in PEM format to accept only TLS
+connections. A self-signed certificate for local testing:
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+  -keyout key.pem -out cert.pem -subj /CN=localhost \
+  -addext subjectAltName=IP:127.0.0.1,DNS:localhost
+go run . -tls-cert cert.pem -tls-key key.pem
+```
+
+```bash
+docker run --rm -it --network host -v "$PWD:/certs:ro" redis:7 \
+  redis-cli -p 9000 --tls --cacert /certs/cert.pem
+```
+
+TLS 1.2 is the minimum version. Clients that do not speak TLS or do not trust
+the certificate are disconnected. The metrics port stays plain HTTP.
 
 ## Metrics and profiling
 
@@ -275,6 +298,8 @@ restart. Append-only file tests write to temporary directories and cover the
 exact file contents, the fsync policies, concurrent appends, kept write and
 fsync errors, truncated last records and corrupt files. Metrics tests read
 the `/metrics` output after real client sessions and cover the `pprof` handlers.
+TLS tests generate a self-signed certificate at runtime and talk to the server
+through `crypto/tls`.
 
 The parser also has fuzz tests:
 

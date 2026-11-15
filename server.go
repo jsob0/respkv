@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ type Server struct {
 	aof             *AOF
 	metricsAddr     string
 	metrics         *metrics
+	tlsConfig       *tls.Config
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
@@ -101,6 +103,10 @@ func (s *Server) serveMetrics(listener net.Listener) (stop func()) {
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
+	if s.tlsConfig != nil {
+		listener = tls.NewListener(listener, s.tlsConfig)
+	}
+
 	if s.aofPath != "" {
 		if err := s.openAOF(); err != nil {
 			return err
@@ -129,7 +135,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		})
 	}
 
-	s.logger.Info("server listening", "addr", listener.Addr().String())
+	s.logger.Info("server listening", "addr", listener.Addr().String(), "tls", s.tlsConfig != nil)
 
 	for {
 		conn, err := listener.Accept()
