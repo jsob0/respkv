@@ -116,12 +116,15 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		r := execute(s.store, args)
+		// Redis ignores empty inline lines, and redis-cli --pipe sends one.
+		if len(args) > 0 {
+			r := execute(s.store, args)
 
-		conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
-		if _, err := writer.Write(r.encode()); err != nil {
-			logger.Warn("write failed", "err", err)
-			return
+			conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+			if _, err := writer.Write(r.encode()); err != nil {
+				logger.Warn("write failed", "err", err)
+				return
+			}
 		}
 		if reader.Buffered() == 0 {
 			if err := writer.Flush(); err != nil {

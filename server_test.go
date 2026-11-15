@@ -122,7 +122,8 @@ func TestCommands(t *testing.T) {
 
 		{name: "inline", input: "PING\r\n", want: "+PONG\r\n"},
 		{name: "inline with bare newline", input: "PING\n", want: "+PONG\r\n"},
-		{name: "empty inline line", input: "\r\n", want: "-ERR empty command\r\n"},
+		{name: "empty inline line is ignored", input: "\r\nPING\r\n", want: "+PONG\r\n"},
+		{name: "reply flushed before empty inline line", input: "PING\r\n\r\n", want: "+PONG\r\n"},
 		{
 			name:  "longest inline line",
 			input: "ECHO " + longestInlineArgument + "\n",
