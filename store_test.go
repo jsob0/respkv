@@ -215,6 +215,56 @@ func TestExpireExpiredKey(t *testing.T) {
 	}
 }
 
+func TestExpireAt(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		at         time.Duration
+		want       bool
+		wantFound  bool
+		wantStored []string
+	}{
+		{name: "future", key: "key", at: 10 * time.Second, want: true, wantFound: true, wantStored: []string{"key"}},
+		{name: "now deletes", key: "key", at: 0, want: true, wantFound: false},
+		{name: "past deletes", key: "key", at: -time.Second, want: true, wantFound: false},
+		{name: "missing key", key: "missing", at: 10 * time.Second, want: false, wantFound: false, wantStored: []string{"key"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newStoreWithClock()
+			s.Set("key", "value")
+			at := s.now().Add(tt.at)
+
+			if got := s.ExpireAt(tt.key, at); got != tt.want {
+				t.Errorf("ExpireAt(%q, %v) = %v, want %v", tt.key, at, got, tt.want)
+			}
+			if _, found := s.Get(tt.key); found != tt.wantFound {
+				t.Errorf("Get(%q) found = %v, want %v", tt.key, found, tt.wantFound)
+			}
+			assertStoredKeys(t, s, tt.wantStored...)
+			if !tt.wantFound {
+				return
+			}
+			if remaining, _, _ := s.TTL(tt.key); remaining != tt.at {
+				t.Errorf("TTL(%q) remaining = %v, want %v", tt.key, remaining, tt.at)
+			}
+		})
+	}
+}
+
+func TestExpireAtExpiredKey(t *testing.T) {
+	s, advance := newStoreWithClock()
+
+	s.Set("key", "value")
+	s.Expire("key", 10*time.Second)
+	advance(10 * time.Second)
+
+	if got := s.ExpireAt("key", s.now().Add(10*time.Second)); got {
+		t.Errorf("ExpireAt() = %v, want false", got)
+	}
+}
+
 func TestTTL(t *testing.T) {
 	tests := []struct {
 		name string

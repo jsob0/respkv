@@ -14,13 +14,14 @@ type commandFunc func(store *Store, args []string) (reply, error)
 var errNotInteger = errors.New("value is not an integer or out of range")
 
 var commands = map[string]commandFunc{
-	"get":    getCommand,
-	"set":    setCommand,
-	"del":    delCommand,
-	"echo":   echoCommand,
-	"ping":   pingCommand,
-	"expire": expireCommand,
-	"ttl":    ttlCommand,
+	"get":       getCommand,
+	"set":       setCommand,
+	"del":       delCommand,
+	"echo":      echoCommand,
+	"ping":      pingCommand,
+	"expire":    expireCommand,
+	"pexpireat": pexpireatCommand,
+	"ttl":       ttlCommand,
 }
 
 func execute(store *Store, args []string) reply {
@@ -96,6 +97,20 @@ func expireCommand(store *Store, args []string) (reply, error) {
 	}
 	ttl := time.Duration(seconds) * time.Second
 	if store.Expire(args[0], ttl) {
+		return integer(1), nil
+	}
+	return integer(0), nil
+}
+
+func pexpireatCommand(store *Store, args []string) (reply, error) {
+	if len(args) != 2 {
+		return nil, errWrongArgs("pexpireat")
+	}
+	ms, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return nil, errNotInteger
+	}
+	if store.ExpireAt(args[0], time.UnixMilli(ms)) {
 		return integer(1), nil
 	}
 	return integer(0), nil

@@ -63,17 +63,14 @@ func (s *Store) Expire(key string, ttl time.Duration) bool {
 	defer s.mu.Unlock()
 
 	now := s.now()
-	e, ok := s.getLocked(key, now)
-	if !ok {
-		return false
-	}
-	if ttl <= 0 {
-		delete(s.data, key)
-		return true
-	}
-	e.expiresAt = now.Add(ttl)
-	s.data[key] = e
-	return true
+	return s.expireAtLocked(key, now.Add(ttl), now)
+}
+
+func (s *Store) ExpireAt(key string, at time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.expireAtLocked(key, at, s.now())
 }
 
 func (s *Store) TTL(key string) (remaining time.Duration, hasExpiry, ok bool) {
@@ -125,4 +122,18 @@ func (s *Store) getLocked(key string, now time.Time) (entry, bool) {
 		return e, true
 	}
 	return entry{}, false
+}
+
+func (s *Store) expireAtLocked(key string, at, now time.Time) bool {
+	e, ok := s.getLocked(key, now)
+	if !ok {
+		return false
+	}
+	if !now.Before(at) {
+		delete(s.data, key)
+		return true
+	}
+	e.expiresAt = at
+	s.data[key] = e
+	return true
 }

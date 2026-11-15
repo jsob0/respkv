@@ -48,6 +48,14 @@ func TestExecute(t *testing.T) {
 		{name: "expire with fractional seconds", line: "EXPIRE key 1.5", want: errorReply("ERR value is not an integer or out of range")},
 		{name: "expire with too large seconds", line: "EXPIRE key 9223372037", want: errorReply("ERR value is not an integer or out of range")},
 
+		{name: "pexpireat missing key", line: "PEXPIREAT missing 1800000000000", want: integer(0)},
+		{name: "pexpireat without arguments", line: "PEXPIREAT", want: errorReply("ERR wrong number of arguments for 'pexpireat' command")},
+		{name: "pexpireat without time", line: "PEXPIREAT key", want: errorReply("ERR wrong number of arguments for 'pexpireat' command")},
+		{name: "pexpireat with too many arguments", line: "PEXPIREAT key 1 2", want: errorReply("ERR wrong number of arguments for 'pexpireat' command")},
+		{name: "pexpireat with non-integer time", line: "PEXPIREAT key abc", want: errorReply("ERR value is not an integer or out of range")},
+		{name: "pexpireat with fractional time", line: "PEXPIREAT key 1.5", want: errorReply("ERR value is not an integer or out of range")},
+		{name: "pexpireat with too large time", line: "PEXPIREAT key 9223372036854775808", want: errorReply("ERR value is not an integer or out of range")},
+
 		{name: "ttl missing key", line: "TTL missing", want: integer(-2)},
 		{name: "ttl without key", line: "TTL", want: errorReply("ERR wrong number of arguments for 'ttl' command")},
 		{name: "ttl with too many arguments", line: "TTL a b", want: errorReply("ERR wrong number of arguments for 'ttl' command")},
@@ -159,6 +167,20 @@ func TestExecuteExpiration(t *testing.T) {
 		{input: "SET m v", want: simpleString("OK")},
 		{input: "EXPIRE m 9223372036", want: integer(1)},
 		{input: "TTL m", want: integer(9223372036)},
+
+		// The clock is now at 1 000 010 s, that is 1 000 010 000 ms.
+		{input: "SET p v", want: simpleString("OK")},
+		{input: "PEXPIREAT p 1000020000", want: integer(1)},
+		{input: "TTL p", want: integer(10)},
+		{input: "PEXPIREAT p 1000010001", want: integer(1)},
+		{input: "TTL p", want: integer(1)},
+		{input: "PEXPIREAT p 1000010000", want: integer(1)},
+		{input: "GET p", want: nullBulk{}},
+		{input: "PEXPIREAT p 1000020000", want: integer(0)},
+
+		{input: "SET q v", want: simpleString("OK")},
+		{input: "PEXPIREAT q -1", want: integer(1)},
+		{input: "GET q", want: nullBulk{}},
 	}
 
 	s, advance := newStoreWithClock()
