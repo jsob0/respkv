@@ -74,6 +74,13 @@ func (a *AOF) Append(args ...string) {
 	}
 }
 
+func (a *AOF) Flush() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.flushLocked(false)
+}
+
 func (a *AOF) Sync() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

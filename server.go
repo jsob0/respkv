@@ -31,6 +31,7 @@ type Server struct {
 	aofPath         string
 	aofPolicy       fsyncPolicy
 	aofSyncInterval time.Duration
+	aof             *AOF
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
@@ -56,14 +57,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
-	var aof *AOF
 	if s.aofPath != "" {
-		var err error
-		if aof, err = s.openAOF(); err != nil {
+		if err := s.openAOF(); err != nil {
 			return err
 		}
 		defer func() {
-			if err := aof.Close(); err != nil {
+			if err := s.aof.Close(); err != nil {
 				s.logger.Error("append-only file close failed", "err", err)
 			}
 		}()
@@ -80,9 +79,9 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	wg.Go(func() {
 		s.store.RunExpiration(ctx, s.expireInterval)
 	})
-	if aof != nil {
+	if s.aof != nil {
 		wg.Go(func() {
-			s.runAOFSync(ctx, aof)
+			s.runAOFSync(ctx)
 		})
 	}
 
@@ -105,10 +104,10 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
-func (s *Server) openAOF() (*AOF, error) {
+func (s *Server) openAOF() error {
 	result, err := loadAOF(s.aofPath, s.store)
 	if err != nil {
-		return nil, fmt.Errorf("load append-only file: %w", err)
+		return fmt.Errorf("load append-only file: %w", err)
 	}
 	if result.truncatedBytes > 0 {
 		s.logger.Warn("append-only file had a truncated last record, removed it",
@@ -118,13 +117,14 @@ func (s *Server) openAOF() (*AOF, error) {
 
 	aof, err := OpenAOF(s.aofPath, s.aofPolicy)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	s.aof = aof
 	s.store.aof = aof
-	return aof, nil
+	return nil
 }
 
-func (s *Server) runAOFSync(ctx context.Context, aof *AOF) {
+func (s *Server) runAOFSync(ctx context.Context) {
 	ticker := time.NewTicker(s.aofSyncInterval)
 	defer ticker.Stop()
 
@@ -134,7 +134,7 @@ func (s *Server) runAOFSync(ctx context.Context, aof *AOF) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := aof.Sync(); err != nil && !reported {
+			if err := s.aof.Sync(); err != nil && !reported {
 				s.logger.Error("append-only file sync failed", "err", err)
 				reported = true
 			}
@@ -186,6 +186,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			}
 		}
 		if reader.Buffered() == 0 {
+			if s.aof != nil {
+				s.aof.Flush()
+			}
 			if err := writer.Flush(); err != nil {
 				logger.Warn("write failed", "err", err)
 				return

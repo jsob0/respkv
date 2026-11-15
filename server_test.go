@@ -381,17 +381,30 @@ func TestServerPersistsAcrossRestart(t *testing.T) {
 	assertFileContent(t, path, string(written))
 }
 
-func TestServerUsesFsyncPolicy(t *testing.T) {
+func TestServerWritesAOFBeforeReplying(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "appendonly.aof")
 	s := newTestServer()
 	s.aofPath = path
-	s.aofPolicy = fsyncAlways
 	s.aofSyncInterval = time.Hour
 	addr, _ := startServer(t, s)
 
 	assertReply(t, dial(t, addr), encodeCommand("SET", "k", "v"), "+OK\r\n")
 
 	assertFileContent(t, path, encodeCommand("SET", "k", "v"))
+}
+
+func TestServerUsesFsyncPolicy(t *testing.T) {
+	s := newTestServer()
+	s.aofPath = filepath.Join(t.TempDir(), "appendonly.aof")
+	s.aofPolicy = fsyncNo
+	if err := s.openAOF(); err != nil {
+		t.Fatalf("openAOF() err = %v", err)
+	}
+	t.Cleanup(func() { s.aof.Close() })
+
+	if got := s.aof.policy; got != fsyncNo {
+		t.Errorf("AOF policy = %v, want %v", got, fsyncNo)
+	}
 }
 
 func TestServerSyncsAOFPeriodically(t *testing.T) {

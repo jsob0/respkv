@@ -83,6 +83,17 @@ func TestAOFBuffersUntilSync(t *testing.T) {
 	}
 }
 
+func TestAOFFlush(t *testing.T) {
+	a, path := openTestAOF(t, fsyncEverySec)
+
+	a.Append("SET", "k", "v")
+	if err := a.Flush(); err != nil {
+		t.Fatalf("Flush() err = %v", err)
+	}
+
+	assertFileContent(t, path, encodeCommand("SET", "k", "v"))
+}
+
 func TestAOFReopenAppends(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "appendonly.aof")
 
