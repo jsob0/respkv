@@ -21,7 +21,7 @@ func newTestServer() *Server {
 	return NewServer("", slog.New(slog.DiscardHandler))
 }
 
-func startServer(t *testing.T, s *Server) (addr string, stop func() error) {
+func startServer(t testing.TB, s *Server) (addr string, stop func() error) {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -53,7 +53,7 @@ func startServer(t *testing.T, s *Server) (addr string, stop func() error) {
 	return listener.Addr().String(), stop
 }
 
-func dial(t *testing.T, addr string) net.Conn {
+func dial(t testing.TB, addr string) net.Conn {
 	t.Helper()
 
 	conn, err := net.Dial("tcp", addr)
@@ -451,5 +451,46 @@ func TestServerRefusesCorruptAOF(t *testing.T) {
 	}
 	if _, err := net.Dial("tcp", listener.Addr().String()); err == nil {
 		t.Error("listener still accepts connections after Serve failed")
+	}
+}
+
+func BenchmarkServer(b *testing.B) {
+	value := strings.Repeat("v", 64)
+
+	cases := []struct {
+		name     string
+		pipeline int
+		aof      bool
+	}{
+		{name: "one command per round trip", pipeline: 1},
+		{name: "pipeline of 16", pipeline: 16},
+		{name: "one command per round trip with AOF", pipeline: 1, aof: true},
+		{name: "pipeline of 16 with AOF", pipeline: 16, aof: true},
+	}
+
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			s := newTestServer()
+			if c.aof {
+				s.aofPath = filepath.Join(b.TempDir(), "appendonly.aof")
+			}
+			addr, _ := startServer(b, s)
+			conn := dial(b, addr)
+			conn.SetDeadline(time.Time{})
+
+			input := []byte(strings.Repeat(encodeCommand("SET", "key", value), c.pipeline))
+			reply := make([]byte, len("+OK\r\n")*c.pipeline)
+
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := conn.Write(input); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := io.ReadFull(conn, reply); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*c.pipeline), "ns/command")
+		})
 	}
 }

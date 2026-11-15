@@ -436,3 +436,43 @@ func TestStoreAppendsInApplyOrder(t *testing.T) {
 		t.Errorf("last record value = %q, stored value = %q", last[2], got)
 	}
 }
+
+func BenchmarkStoreParallel(b *testing.B) {
+	const keyCount = 1000
+
+	keys := make([]string, keyCount)
+	for i := range keys {
+		keys[i] = "key:" + strconv.Itoa(i)
+	}
+
+	mixes := []struct {
+		name     string
+		setEvery int
+	}{
+		{name: "reads only", setEvery: 0},
+		{name: "10% writes", setEvery: 10},
+		{name: "writes only", setEvery: 1},
+	}
+
+	for _, mix := range mixes {
+		b.Run(mix.name, func(b *testing.B) {
+			s := NewStore()
+			for _, key := range keys {
+				s.Set(key, "value")
+			}
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					key := keys[i%keyCount]
+					if mix.setEvery > 0 && i%mix.setEvery == 0 {
+						s.Set(key, "value")
+					} else {
+						s.Get(key)
+					}
+					i++
+				}
+			})
+		})
+	}
+}

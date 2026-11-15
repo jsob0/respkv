@@ -473,3 +473,22 @@ func TestFsyncPolicyString(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkAOFAppend(b *testing.B) {
+	value := strings.Repeat("v", 64)
+
+	for _, policy := range []fsyncPolicy{fsyncNo, fsyncEverySec, fsyncAlways} {
+		b.Run(policy.String(), func(b *testing.B) {
+			a, err := OpenAOF(filepath.Join(b.TempDir(), "appendonly.aof"), policy)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer a.Close()
+
+			b.ReportAllocs()
+			for b.Loop() {
+				a.Append("SET", "key:12345", value)
+			}
+		})
+	}
+}

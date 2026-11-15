@@ -202,3 +202,49 @@ func FuzzReadCommandRoundTrip(f *testing.F) {
 		}
 	})
 }
+
+func BenchmarkReadCommand(b *testing.B) {
+	inputs := []struct {
+		name  string
+		input string
+	}{
+		{name: "array", input: encodeCommand("SET", "key:12345", strings.Repeat("v", 64))},
+		{name: "inline", input: "SET key:12345 " + strings.Repeat("v", 64) + "\r\n"},
+	}
+
+	for _, in := range inputs {
+		b.Run(in.name, func(b *testing.B) {
+			src := strings.NewReader(in.input)
+			r := newCommandReader(src)
+			b.SetBytes(int64(len(in.input)))
+			b.ReportAllocs()
+			for b.Loop() {
+				src.Reset(in.input)
+				r.Reset(src)
+				if _, err := readCommand(r); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkReplyEncode(b *testing.B) {
+	replies := []struct {
+		name  string
+		reply reply
+	}{
+		{name: "simple string", reply: simpleString("OK")},
+		{name: "bulk string", reply: bulkString(strings.Repeat("v", 64))},
+		{name: "array", reply: bulkArray{"SET", "key:12345", strings.Repeat("v", 64)}},
+	}
+
+	for _, rp := range replies {
+		b.Run(rp.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				rp.reply.encode()
+			}
+		})
+	}
+}

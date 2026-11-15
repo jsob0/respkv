@@ -188,3 +188,26 @@ func TestExecuteExpiration(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkExecute(b *testing.B) {
+	store := NewStore()
+	store.Set("key", "value")
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: "set", args: []string{"SET", "key", "value"}},
+		{name: "get", args: []string{"GET", "key"}},
+		{name: "ping", args: []string{"PING"}},
+	}
+
+	for _, c := range commands {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				execute(store, c.args)
+			}
+		})
+	}
+}
