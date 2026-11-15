@@ -4,16 +4,18 @@
 
 A Redis-inspired key-value store in Go, built from the TCP layer up.
 
-> **Status: early development.** The server keeps data in memory and handles the
-> `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXPIRE` and `TTL` commands over the Redis
-> protocol (RESP), so it works with `redis-cli`. Persistence is planned; see the
-> [roadmap](#roadmap).
+> **Status: early development.** The server handles the `PING`, `ECHO`, `SET`,
+> `GET`, `DEL`, `EXPIRE`, `PEXPIREAT` and `TTL` commands over the Redis protocol
+> (RESP), so it works with `redis-cli`, and can persist data to an append-only
+> file. Metrics and benchmarks are next; see the [roadmap](#roadmap).
 
 ## Features
 
 - In-memory key-value store shared by all clients and safe for concurrent use
 - Key expiration: expired keys are hidden as soon as they expire and removed
   from memory by a background task every second
+- Optional persistence with an append-only file (AOF), replayed on startup, with
+  the `always`, `everysec` and `no` fsync policies known from Redis
 - RESP2 protocol: commands as arrays of bulk strings, as sent by `redis-cli`
   and Redis client libraries, plus inline commands typed by hand
 - Case-insensitive command names; keys and values can hold any bytes, including
@@ -109,22 +111,80 @@ stderr as JSON:
 | `GET <key>`              | Bulk string with the value, or a null bulk string if there is none                  |
 | `DEL <key> [key...]`     | Integer: number of keys removed                                                     |
 | `EXPIRE <key> <seconds>` | Integer: `1` if the timeout was set, `0` if the key does not exist                  |
+| `PEXPIREAT <key> <ms>`   | Like `EXPIRE`, but with an absolute Unix time in milliseconds                       |
 | `TTL <key>`              | Integer: seconds left, `-1` if the key has no expiration, `-2` if it does not exist |
 
-`EXPIRE` with zero or a negative number of seconds deletes the key. `TTL` rounds
-up to whole seconds.
+`EXPIRE` with zero or a negative number of seconds, and `PEXPIREAT` with a time
+in the past, delete the key. `TTL` rounds up to whole seconds.
 
 Errors are returned as RESP errors starting with `ERR`. Empty inline commands
-are ignored, as in Redis. Data is lost when the server stops.
+are ignored, as in Redis. Without `-aof`, data is lost when the server stops.
 
 ### Options
 
-| Flag    | Default          | Description                 |
-|---------|------------------|-----------------------------|
-| `-addr` | `127.0.0.1:9000` | TCP address to listen on    |
+| Flag           | Default          | Description                                                      |
+|----------------|------------------|------------------------------------------------------------------|
+| `-addr`        | `127.0.0.1:9000` | TCP address to listen on                                         |
+| `-aof`         | empty            | Append-only file path; empty disables persistence                |
+| `-appendfsync` | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
 
 By default the server only accepts connections from the local machine. Use
 `-addr :9000` to listen on all interfaces.
+
+## Persistence
+
+With `-aof`, every change is appended to the file as a RESP command before the
+reply is sent, and the file is replayed when the server starts:
+
+```console
+$ go run . -aof appendonly.aof
+$ redis-cli -p 9000 SET greeting "hello world"
+OK
+$ redis-cli -p 9000 SET session abc
+OK
+$ redis-cli -p 9000 EXPIRE session 3600
+(integer) 1
+```
+
+After a restart with the same file:
+
+```console
+$ redis-cli -p 9000 GET greeting
+"hello world"
+$ redis-cli -p 9000 TTL session
+(integer) 3599
+```
+
+```json
+{"time":"2026-11-15T18:16:58.459157989+01:00","level":"INFO","msg":"append-only file loaded","path":"appendonly.aof","commands":3}
+```
+
+How it works:
+
+- Only changes are logged: `SET`, `DEL` with the keys that were actually
+  deleted, and expirations as `PEXPIREAT` with an absolute time, so a key does
+  not live longer because the server was down.
+- Records are appended while the store holds its lock, so the file order always
+  matches the order in which changes were applied.
+- Records are handed to the operating system before the reply is sent, so a
+  crash of the server process loses no acknowledged write. The fsync policy
+  decides what survives a power loss:
+
+  | Policy     | fsync                   | Lost on power loss                               |
+  |------------|-------------------------|--------------------------------------------------|
+  | `always`   | after every change      | nothing                                          |
+  | `everysec` | once a second (default) | up to about 1 second                             |
+  | `no`       | left to the OS          | up to the OS (Linux usually writes within ~30 s) |
+
+- If the last record is incomplete, for example after a crash in the middle of a
+  write, it is removed and a warning is logged. Damage anywhere else stops the
+  server with an error that gives the byte offset, and the file is left
+  untouched.
+- The file only grows; rewriting it to a compact form is not implemented yet.
+
+Checked by hand: 10,000 `SET` commands loaded with `redis-cli --pipe` and the
+server killed with `kill -9` right after the last reply. All 10,000 keys were
+back after a restart with each fsync policy.
 
 ## Testing
 
@@ -139,7 +199,10 @@ once and one byte at a time. Expiration unit tests use a fake clock or
 real server on a random port and talk to it over TCP. They cover commands,
 commands split across writes, pipelining, protocol errors, incomplete commands,
 concurrent clients, data shared between clients, background removal of expired
-keys, timeouts, the length limits and graceful shutdown.
+keys, timeouts, the length limits, graceful shutdown and persistence across a
+restart. Append-only file tests write to temporary directories and cover the
+exact file contents, the fsync policies, concurrent appends, kept write and
+fsync errors, truncated last records and corrupt files.
 
 The parser also has fuzz tests:
 
@@ -157,7 +220,7 @@ go test -fuzz=FuzzReadCommandRoundTrip -fuzztime=30s
 - [x] In-memory storage: `SET`, `GET`, `DEL`
 - [x] Key expiration (TTL)
 - [x] RESP protocol, compatible with `redis-cli`
-- [ ] Persistence with an append-only file
+- [x] Persistence with an append-only file
 - [ ] Metrics, profiling and benchmarks
 - [ ] Docker image and TLS
 
