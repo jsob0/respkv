@@ -96,11 +96,38 @@ Press `Ctrl+C` in the server terminal to shut it down. Logs are written to
 stderr as JSON:
 
 ```json
-{"time":"2026-11-06T18:41:41.015324873+01:00","level":"INFO","msg":"server listening","addr":"127.0.0.1:9000"}
+{"time":"2026-11-06T18:41:41.015324873+01:00","level":"INFO","msg":"server listening","addr":"127.0.0.1:9000","tls":false}
 {"time":"2026-11-06T18:41:41.428971597+01:00","level":"INFO","msg":"client connected","remote_addr":"127.0.0.1:46576"}
 {"time":"2026-11-06T18:41:41.429230093+01:00","level":"INFO","msg":"client disconnected","remote_addr":"127.0.0.1:46576"}
 {"time":"2026-11-06T18:41:41.634610905+01:00","level":"INFO","msg":"server shutting down"}
 ```
+
+### Docker
+
+The image is built from a static binary on a distroless base, about 22 MB, and
+runs as a non-root user. By default it listens on port 6379 and keeps the
+append-only file in the `/data` volume:
+
+```bash
+docker build -t respkv .
+docker run -d --name respkv -p 127.0.0.1:6379:6379 -v respkv-data:/data respkv
+docker run --rm -it --network host redis:7 redis-cli
+```
+
+`docker stop` sends `SIGTERM`, so the server shuts down gracefully and flushes
+the append-only file. Arguments after the image name replace the defaults, for
+example to add metrics and TLS:
+
+```bash
+docker run -d -p 127.0.0.1:6379:6379 -p 127.0.0.1:9100:9100 \
+  -v respkv-data:/data -v "$PWD/certs:/certs:ro" respkv \
+  -addr :6379 -aof /data/appendonly.aof -metrics-addr :9100 \
+  -tls-cert /certs/cert.pem -tls-key /certs/key.pem
+```
+
+The server runs as UID 65532, so the key file must be readable by that user,
+for example with `chmod 644 key.pem` for a local test certificate. On systems
+with SELinux, add `,z` to the volume options.
 
 ### Commands
 
@@ -319,7 +346,7 @@ go test -fuzz=FuzzReadCommandRoundTrip -fuzztime=30s
 - [x] RESP protocol, compatible with `redis-cli`
 - [x] Persistence with an append-only file
 - [x] Metrics, profiling and benchmarks
-- [ ] Docker image and TLS
+- [x] Docker image and TLS
 
 ## License
 
