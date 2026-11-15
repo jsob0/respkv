@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 )
@@ -16,7 +17,10 @@ const (
 	fsyncNo
 )
 
-var errAOFClosed = errors.New("append-only file is closed")
+var (
+	errAOFClosed  = errors.New("append-only file is closed")
+	errAOFCorrupt = errors.New("append-only file is corrupt")
+)
 
 type AOF struct {
 	mu     sync.Mutex
@@ -87,4 +91,70 @@ func (a *AOF) flushLocked(fsync bool) error {
 		}
 	}
 	return nil
+}
+
+type loadResult struct {
+	commands       int
+	truncatedBytes int64
+}
+
+func loadAOF(path string, store *Store) (loadResult, error) {
+	var result loadResult
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return result, nil
+	}
+	if err != nil {
+		return result, fmt.Errorf("open append-only file: %w", err)
+	}
+	defer file.Close()
+
+	counter := &countingReader{r: file}
+	r := newCommandReader(counter)
+	for {
+		offset := counter.n - int64(r.Buffered())
+
+		args, err := readCommand(r)
+		switch {
+		case errors.Is(err, io.EOF):
+			return result, nil
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			result.truncatedBytes = counter.n - offset
+			if err := truncateFile(file, offset); err != nil {
+				return result, err
+			}
+			return result, nil
+		case errors.Is(err, errProtocol):
+			return result, fmt.Errorf("%w at byte %d: %w", errAOFCorrupt, offset, err)
+		case err != nil:
+			return result, fmt.Errorf("read append-only file: %w", err)
+		}
+
+		if failed, ok := execute(store, args).(errorReply); ok {
+			return result, fmt.Errorf("%w at byte %d: %s", errAOFCorrupt, offset, string(failed))
+		}
+		result.commands++
+	}
+}
+
+func truncateFile(file *os.File, size int64) error {
+	if err := file.Truncate(size); err != nil {
+		return fmt.Errorf("truncate append-only file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync append-only file: %w", err)
+	}
+	return nil
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
