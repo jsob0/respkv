@@ -12,6 +12,7 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9000", "TCP address to listen on")
 	aofPath := flag.String("aof", "", "append-only file path; empty disables persistence")
+	metricsAddr := flag.String("metrics-addr", "", "HTTP address for Prometheus metrics and pprof; empty disables it")
 	var policy fsyncPolicy
 	flag.Var(&policy, "appendfsync", "fsync policy for the append-only file: always, everysec or no")
 	flag.Parse()
@@ -24,6 +25,7 @@ func main() {
 	server := NewServer(*addr, logger)
 	server.aofPath = *aofPath
 	server.aofPolicy = policy
+	server.metricsAddr = *metricsAddr
 	if err := server.ListenAndServe(ctx); err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)

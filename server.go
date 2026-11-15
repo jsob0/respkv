@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ const (
 	defaultWriteTimeout    = 5 * time.Second
 	defaultExpireInterval  = time.Second
 	defaultAOFSyncInterval = time.Second
+	metricsHeaderTimeout   = 5 * time.Second
+	metricsShutdownTimeout = 5 * time.Second
 )
 
 type Server struct {
@@ -32,17 +35,21 @@ type Server struct {
 	aofPolicy       fsyncPolicy
 	aofSyncInterval time.Duration
 	aof             *AOF
+	metricsAddr     string
+	metrics         *metrics
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
+	store := NewStore()
 	return &Server{
 		addr:            addr,
 		logger:          logger,
 		idleTimeout:     defaultIdleTimeout,
 		writeTimeout:    defaultWriteTimeout,
-		store:           NewStore(),
+		store:           store,
 		expireInterval:  defaultExpireInterval,
 		aofSyncInterval: defaultAOFSyncInterval,
+		metrics:         newMetrics(store),
 	}
 }
 
@@ -51,7 +58,44 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+
+	if s.metricsAddr != "" {
+		metricsListener, err := net.Listen("tcp", s.metricsAddr)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("start metrics server: %w", err)
+		}
+		stopMetrics := s.serveMetrics(metricsListener)
+		defer stopMetrics()
+	}
+
 	return s.Serve(ctx, listener)
+}
+
+func (s *Server) serveMetrics(listener net.Listener) (stop func()) {
+	server := &http.Server{
+		Handler:           s.metrics.handler(),
+		ReadHeaderTimeout: metricsHeaderTimeout,
+		ErrorLog:          slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.logger.Info("metrics listening", "addr", listener.Addr().String())
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			s.logger.Error("metrics server failed", "err", err)
+		}
+	}()
+
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			server.Close()
+		}
+		<-done
+	}
 }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
@@ -98,6 +142,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 			time.Sleep(acceptRetryDelay)
 			continue
 		}
+		s.metrics.connectionsTotal.Inc()
 		wg.Go(func() {
 			s.handleConnection(ctx, conn)
 		})
@@ -121,6 +166,7 @@ func (s *Server) openAOF() error {
 	}
 	s.aof = aof
 	s.store.aof = aof
+	s.metrics.registerAOF(aof)
 	return nil
 }
 
@@ -145,8 +191,10 @@ func (s *Server) runAOFSync(ctx context.Context) {
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	logger := s.logger.With("remote_addr", conn.RemoteAddr().String())
 
+	s.metrics.connectedClients.Inc()
 	defer func() {
 		conn.Close()
+		s.metrics.connectedClients.Dec()
 		logger.Info("client disconnected")
 	}()
 
@@ -177,7 +225,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		if len(args) > 0 {
+			start := time.Now()
 			r := execute(s.store, args)
+			s.metrics.observeCommand(args[0], time.Since(start))
 
 			conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 			if _, err := writer.Write(r.encode()); err != nil {

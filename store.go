@@ -50,6 +50,13 @@ func (s *Store) Set(key, value string) {
 	s.appendLocked("SET", key, value)
 }
 
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return len(s.data)
+}
+
 func (s *Store) Delete(keys ...string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

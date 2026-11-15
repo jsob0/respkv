@@ -33,6 +33,7 @@ A Redis-inspired key-value store in Go, built from the TCP layer up.
 - Limits: 1024 arguments per command, 1 MiB per argument and 64 KiB per inline
   command, including the newline
 - Structured JSON logging with `log/slog`
+- Optional Prometheus metrics and `pprof` profiling on a separate HTTP port
 - Unit and integration tests run with the race detector in CI
 
 ## Getting started
@@ -122,11 +123,12 @@ are ignored, as in Redis. Without `-aof`, data is lost when the server stops.
 
 ### Options
 
-| Flag           | Default          | Description                                                      |
-|----------------|------------------|------------------------------------------------------------------|
-| `-addr`        | `127.0.0.1:9000` | TCP address to listen on                                         |
-| `-aof`         | empty            | Append-only file path; empty disables persistence                |
-| `-appendfsync` | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
+| Flag            | Default          | Description                                                      |
+|-----------------|------------------|------------------------------------------------------------------|
+| `-addr`         | `127.0.0.1:9000` | TCP address to listen on                                         |
+| `-aof`          | empty            | Append-only file path; empty disables persistence                |
+| `-appendfsync`  | `everysec`       | When to fsync the append-only file: `always`, `everysec` or `no` |
+| `-metrics-addr` | empty            | HTTP address for metrics and `pprof`; empty disables it          |
 
 By default the server only accepts connections from the local machine. Use
 `-addr :9000` to listen on all interfaces.
@@ -186,6 +188,38 @@ Checked by hand: 10,000 `SET` commands loaded with `redis-cli --pipe` and the
 server killed with `kill -9` right after the last reply. All 10,000 keys were
 back after a restart with each fsync policy.
 
+## Metrics and profiling
+
+Start the server with `-metrics-addr` to serve Prometheus metrics and Go's
+`pprof` profiles over HTTP, on a port separate from the clients:
+
+```bash
+go run . -metrics-addr 127.0.0.1:9100
+curl -s 127.0.0.1:9100/metrics | grep '^respkv_'
+```
+
+| Metric                                       | Type      | Description                                                     |
+|----------------------------------------------|-----------|-----------------------------------------------------------------|
+| `respkv_command_duration_seconds{command}`   | histogram | Time spent executing commands; `_count` is the number of calls  |
+| `respkv_connected_clients`                   | gauge     | Open client connections                                         |
+| `respkv_connections_total`                   | counter   | Client connections accepted since start                         |
+| `respkv_keys`                                | gauge     | Keys in the store, including expired keys not removed yet       |
+| `respkv_aof_failed`                          | gauge     | 1 when writing the append-only file failed; only with `-aof`    |
+
+Unknown commands are counted under `command="unknown"`, so clients cannot
+create new label values. Go runtime and process metrics (`go_*`, `process_*`)
+are included too. Measuring commands adds about 0.1 µs per command, mostly the
+two clock reads.
+
+Profiles are served under `/debug/pprof/`, for example a 10-second CPU profile:
+
+```bash
+go tool pprof -http :8080 'http://127.0.0.1:9100/debug/pprof/profile?seconds=10'
+```
+
+The endpoint has no authentication, so keep it on `127.0.0.1` or a private
+network.
+
 ## Testing
 
 ```bash
@@ -202,7 +236,8 @@ concurrent clients, data shared between clients, background removal of expired
 keys, timeouts, the length limits, graceful shutdown and persistence across a
 restart. Append-only file tests write to temporary directories and cover the
 exact file contents, the fsync policies, concurrent appends, kept write and
-fsync errors, truncated last records and corrupt files.
+fsync errors, truncated last records and corrupt files. Metrics tests read
+the `/metrics` output after real client sessions and cover the `pprof` handlers.
 
 The parser also has fuzz tests:
 

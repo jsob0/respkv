@@ -88,6 +88,13 @@ func (a *AOF) Sync() error {
 	return a.flushLocked(a.policy != fsyncNo)
 }
 
+func (a *AOF) Err() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.err
+}
+
 func (a *AOF) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
