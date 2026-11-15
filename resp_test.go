@@ -38,6 +38,10 @@ func TestReplyEncode(t *testing.T) {
 		{name: "bulk string length in bytes", reply: bulkString("zażółć"), want: "$10\r\nzażółć\r\n"},
 
 		{name: "null bulk string", reply: nullBulk{}, want: "$-1\r\n"},
+
+		{name: "array", reply: bulkArray{"SET", "k", "hello world"}, want: "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$11\r\nhello world\r\n"},
+		{name: "array with empty element", reply: bulkArray{"ECHO", ""}, want: "*2\r\n$4\r\nECHO\r\n$0\r\n\r\n"},
+		{name: "empty array", reply: bulkArray{}, want: "*0\r\n"},
 	}
 
 	for _, tt := range tests {

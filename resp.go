@@ -25,6 +25,7 @@ type (
 	integer      int
 	bulkString   string
 	nullBulk     struct{}
+	bulkArray    []string
 )
 
 var lineBreakReplacer = strings.NewReplacer("\r", " ", "\n", " ")
@@ -47,6 +48,14 @@ func (r bulkString) encode() []byte {
 
 func (nullBulk) encode() []byte {
 	return []byte("$-1\r\n")
+}
+
+func (r bulkArray) encode() []byte {
+	b := []byte("*" + strconv.Itoa(len(r)) + "\r\n")
+	for _, s := range r {
+		b = append(b, bulkString(s).encode()...)
+	}
+	return b
 }
 
 func newCommandReader(rd io.Reader) *bufio.Reader {
