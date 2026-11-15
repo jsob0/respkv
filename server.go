@@ -14,29 +14,34 @@ import (
 )
 
 const (
-	acceptRetryDelay      = 100 * time.Millisecond
-	defaultIdleTimeout    = 5 * time.Minute
-	defaultWriteTimeout   = 5 * time.Second
-	defaultExpireInterval = time.Second
+	acceptRetryDelay       = 100 * time.Millisecond
+	defaultIdleTimeout     = 5 * time.Minute
+	defaultWriteTimeout    = 5 * time.Second
+	defaultExpireInterval  = time.Second
+	defaultAOFSyncInterval = time.Second
 )
 
 type Server struct {
-	addr           string
-	logger         *slog.Logger
-	idleTimeout    time.Duration
-	writeTimeout   time.Duration
-	store          *Store
-	expireInterval time.Duration
+	addr            string
+	logger          *slog.Logger
+	idleTimeout     time.Duration
+	writeTimeout    time.Duration
+	store           *Store
+	expireInterval  time.Duration
+	aofPath         string
+	aofPolicy       fsyncPolicy
+	aofSyncInterval time.Duration
 }
 
 func NewServer(addr string, logger *slog.Logger) *Server {
 	return &Server{
-		addr:           addr,
-		logger:         logger,
-		idleTimeout:    defaultIdleTimeout,
-		writeTimeout:   defaultWriteTimeout,
-		store:          NewStore(),
-		expireInterval: defaultExpireInterval,
+		addr:            addr,
+		logger:          logger,
+		idleTimeout:     defaultIdleTimeout,
+		writeTimeout:    defaultWriteTimeout,
+		store:           NewStore(),
+		expireInterval:  defaultExpireInterval,
+		aofSyncInterval: defaultAOFSyncInterval,
 	}
 }
 
@@ -51,6 +56,19 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
+	var aof *AOF
+	if s.aofPath != "" {
+		var err error
+		if aof, err = s.openAOF(); err != nil {
+			return err
+		}
+		defer func() {
+			if err := aof.Close(); err != nil {
+				s.logger.Error("append-only file close failed", "err", err)
+			}
+		}()
+	}
+
 	cancelListenerClose := context.AfterFunc(ctx, func() {
 		listener.Close()
 	})
@@ -62,6 +80,11 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	wg.Go(func() {
 		s.store.RunExpiration(ctx, s.expireInterval)
 	})
+	if aof != nil {
+		wg.Go(func() {
+			s.runAOFSync(ctx, aof)
+		})
+	}
 
 	s.logger.Info("server listening", "addr", listener.Addr().String())
 
@@ -79,6 +102,43 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		wg.Go(func() {
 			s.handleConnection(ctx, conn)
 		})
+	}
+}
+
+func (s *Server) openAOF() (*AOF, error) {
+	result, err := loadAOF(s.aofPath, s.store)
+	if err != nil {
+		return nil, fmt.Errorf("load append-only file: %w", err)
+	}
+	if result.truncatedBytes > 0 {
+		s.logger.Warn("append-only file had a truncated last record, removed it",
+			"path", s.aofPath, "bytes", result.truncatedBytes)
+	}
+	s.logger.Info("append-only file loaded", "path", s.aofPath, "commands", result.commands)
+
+	aof, err := OpenAOF(s.aofPath, s.aofPolicy)
+	if err != nil {
+		return nil, err
+	}
+	s.store.aof = aof
+	return aof, nil
+}
+
+func (s *Server) runAOFSync(ctx context.Context, aof *AOF) {
+	ticker := time.NewTicker(s.aofSyncInterval)
+	defer ticker.Stop()
+
+	reported := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := aof.Sync(); err != nil && !reported {
+				s.logger.Error("append-only file sync failed", "err", err)
+				reported = true
+			}
+		}
 	}
 }
 
@@ -116,7 +176,6 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		// Redis ignores empty inline lines, and redis-cli --pipe sends one.
 		if len(args) > 0 {
 			r := execute(s.store, args)
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"io"
 	"maps"
 	"os"
@@ -415,5 +416,49 @@ func TestAOFRoundTrip(t *testing.T) {
 	advance(time.Minute)
 	if _, found := restored.Get("temp"); found {
 		t.Errorf("Get(%q) found = true after its expiration time", "temp")
+	}
+}
+
+func TestFsyncPolicyFlag(t *testing.T) {
+	tests := []struct {
+		args    []string
+		want    fsyncPolicy
+		wantErr bool
+	}{
+		{args: nil, want: fsyncEverySec},
+		{args: []string{"-appendfsync", "everysec"}, want: fsyncEverySec},
+		{args: []string{"-appendfsync", "always"}, want: fsyncAlways},
+		{args: []string{"-appendfsync", "no"}, want: fsyncNo},
+		{args: []string{"-appendfsync", "sometimes"}, wantErr: true},
+		{args: []string{"-appendfsync", "Always"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			fs := flag.NewFlagSet("respkv", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			var got fsyncPolicy
+			fs.Var(&got, "appendfsync", "")
+
+			err := fs.Parse(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Parse(%q) err = %v, want error %v", tt.args, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("Parse(%q) policy = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFsyncPolicyString(t *testing.T) {
+	for _, name := range []string{"always", "everysec", "no"} {
+		var p fsyncPolicy
+		if err := p.Set(name); err != nil {
+			t.Fatalf("Set(%q) err = %v", name, err)
+		}
+		if got := p.String(); got != name {
+			t.Errorf("String() after Set(%q) = %q", name, got)
+		}
 	}
 }

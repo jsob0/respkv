@@ -110,7 +110,6 @@ func TestStoreIsSafeForConcurrentUse(t *testing.T) {
 				key := sharedKeys[j%len(sharedKeys)]
 
 				s.Set(key, "value")
-				// Another goroutine may have deleted the key by now.
 				if got, found := s.Get(key); found && got != "value" {
 					t.Errorf("Get(%q) = %q, want %q", key, got, "value")
 				}
@@ -267,9 +266,8 @@ func TestExpireAtExpiredKey(t *testing.T) {
 
 func TestTTL(t *testing.T) {
 	tests := []struct {
-		name string
-		set  bool
-		// Zero means Expire is not called.
+		name          string
+		set           bool
 		ttl           time.Duration
 		wantRemaining time.Duration
 		wantHasExpiry bool
@@ -353,7 +351,6 @@ func TestRunExpiration(t *testing.T) {
 	})
 }
 
-// assertStoredKeys checks the map itself, since Get hides expired keys anyway.
 func assertStoredKeys(t *testing.T, s *Store, want ...string) {
 	t.Helper()
 

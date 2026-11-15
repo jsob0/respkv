@@ -73,8 +73,6 @@ func TestExecute(t *testing.T) {
 	}
 }
 
-// RESP arguments can hold spaces, line breaks and empty strings, which
-// strings.Fields cannot express.
 func TestExecuteArguments(t *testing.T) {
 	steps := []struct {
 		args []string
@@ -168,7 +166,6 @@ func TestExecuteExpiration(t *testing.T) {
 		{input: "EXPIRE m 9223372036", want: integer(1)},
 		{input: "TTL m", want: integer(9223372036)},
 
-		// The clock is now at 1 000 010 s, that is 1 000 010 000 ms.
 		{input: "SET p v", want: simpleString("OK")},
 		{input: "PEXPIREAT p 1000020000", want: integer(1)},
 		{input: "TTL p", want: integer(10)},

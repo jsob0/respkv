@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -66,8 +68,6 @@ func dial(t *testing.T, addr string) net.Conn {
 	return conn
 }
 
-// assertReply reads exactly len(want) bytes, so extra data after the reply
-// is only noticed by the next read on the same connection.
 func assertReply(t *testing.T, conn net.Conn, input, want string) {
 	t.Helper()
 
@@ -92,7 +92,6 @@ func assertClosedByServer(t *testing.T, conn net.Conn) {
 	}
 }
 
-// A close with unread data is reported as a reset rather than EOF.
 func isConnectionClosed(err error) bool {
 	return errors.Is(err, io.EOF) ||
 		errors.Is(err, syscall.ECONNRESET) ||
@@ -166,8 +165,6 @@ func TestPipelinedCommands(t *testing.T) {
 }
 
 func TestProtocolErrorClosesConnection(t *testing.T) {
-	// Each input ends where the error is found, so the server leaves no
-	// unread data behind and closes with EOF instead of a reset.
 	tests := []struct {
 		name  string
 		input string
@@ -203,7 +200,6 @@ func TestClientsAreHandledConcurrently(t *testing.T) {
 		conns[i] = dial(t, addr)
 	}
 
-	// The last client would never get a reply if earlier connections blocked it.
 	for i := len(conns) - 1; i >= 0; i-- {
 		assertReply(t, conns[i], encodeCommand("PING"), "+PONG\r\n")
 	}
@@ -251,7 +247,6 @@ func TestIdleClientIsDisconnected(t *testing.T) {
 func TestShutdownDisconnectsClientsAndStopsListening(t *testing.T) {
 	addr, stop := startServer(t, newTestServer())
 	conn := dial(t, addr)
-	// Make sure the connection is being handled before shutting down.
 	assertReply(t, conn, encodeCommand("PING"), "+PONG\r\n")
 
 	if err := stop(); err != nil {
@@ -269,8 +264,6 @@ func TestClientSendingTooLongLineIsDisconnected(t *testing.T) {
 	addr, _ := startServer(t, newTestServer())
 	conn := dial(t, addr)
 
-	// The reply content is not checked: a reset may discard it before it
-	// is read. TestProtocolErrorClosesConnection covers the reply.
 	if _, err := io.WriteString(conn, strings.Repeat("a", maxInlineLength)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -350,5 +343,100 @@ func assertNoReply(t *testing.T, conn net.Conn) {
 	}
 	if err != nil {
 		t.Errorf("read: %v", err)
+	}
+}
+
+func TestServerPersistsAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+
+	first := newTestServer()
+	first.aofPath = path
+	addr, stop := startServer(t, first)
+	assertReply(t, dial(t, addr),
+		encodeCommand("SET", "greeting", "hello world")+
+			encodeCommand("SET", "temp", "v")+
+			encodeCommand("EXPIRE", "temp", "100")+
+			encodeCommand("SET", "gone", "v")+
+			encodeCommand("DEL", "gone"),
+		"+OK\r\n+OK\r\n:1\r\n+OK\r\n:1\r\n")
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	second := newTestServer()
+	second.aofPath = path
+	addr, stop = startServer(t, second)
+	assertReply(t, dial(t, addr),
+		encodeCommand("GET", "greeting")+
+			encodeCommand("GET", "gone")+
+			encodeCommand("TTL", "temp"),
+		"$11\r\nhello world\r\n$-1\r\n:100\r\n")
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	assertFileContent(t, path, string(written))
+}
+
+func TestServerUsesFsyncPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	s := newTestServer()
+	s.aofPath = path
+	s.aofPolicy = fsyncAlways
+	s.aofSyncInterval = time.Hour
+	addr, _ := startServer(t, s)
+
+	assertReply(t, dial(t, addr), encodeCommand("SET", "k", "v"), "+OK\r\n")
+
+	assertFileContent(t, path, encodeCommand("SET", "k", "v"))
+}
+
+func TestServerSyncsAOFPeriodically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	s := newTestServer()
+	s.aofPath = path
+	s.aofSyncInterval = time.Millisecond
+	addr, _ := startServer(t, s)
+
+	assertReply(t, dial(t, addr), encodeCommand("SET", "k", "v"), "+OK\r\n")
+
+	want := encodeCommand("SET", "k", "v")
+	deadline := time.Now().Add(testTimeout)
+	for {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read file: %v", err)
+		}
+		if string(got) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("file content = %q, want %q", got, want)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestServerRefusesCorruptAOF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	if err := os.WriteFile(path, []byte(encodeCommand("FOO")), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	s := newTestServer()
+	s.aofPath = path
+	if err := s.Serve(context.Background(), listener); !errors.Is(err, errAOFCorrupt) {
+		t.Errorf("Serve() err = %v, want %v", err, errAOFCorrupt)
+	}
+	if _, err := net.Dial("tcp", listener.Addr().String()); err == nil {
+		t.Error("listener still accepts connections after Serve failed")
 	}
 }

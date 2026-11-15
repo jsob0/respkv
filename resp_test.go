@@ -136,7 +136,6 @@ func TestReadCommand(t *testing.T) {
 	}
 }
 
-// truncate keeps failure messages readable for the large inputs.
 func truncate(args []string) []string {
 	out := make([]string, 0, min(len(args), 4))
 	for _, arg := range args[:min(len(args), 4)] {

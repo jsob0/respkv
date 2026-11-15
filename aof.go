@@ -12,10 +12,30 @@ import (
 type fsyncPolicy int
 
 const (
-	fsyncAlways fsyncPolicy = iota
-	fsyncEverySec
+	fsyncEverySec fsyncPolicy = iota
+	fsyncAlways
 	fsyncNo
 )
+
+var fsyncPolicyNames = map[fsyncPolicy]string{
+	fsyncEverySec: "everysec",
+	fsyncAlways:   "always",
+	fsyncNo:       "no",
+}
+
+func (p fsyncPolicy) String() string {
+	return fsyncPolicyNames[p]
+}
+
+func (p *fsyncPolicy) Set(name string) error {
+	for policy, n := range fsyncPolicyNames {
+		if n == name {
+			*p = policy
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown fsync policy %q, want always, everysec or no", name)
+}
 
 var (
 	errAOFClosed  = errors.New("append-only file is closed")
