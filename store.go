@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 )
+
+type appender interface {
+	Append(args ...string)
+}
 
 type entry struct {
 	value     string
@@ -15,6 +20,7 @@ type Store struct {
 	mu   sync.RWMutex
 	data map[string]entry
 	now  func() time.Time
+	aof  appender
 }
 
 func (e entry) expired(now time.Time) bool {
@@ -41,6 +47,7 @@ func (s *Store) Set(key, value string) {
 	defer s.mu.Unlock()
 
 	s.data[key] = entry{value: value}
+	s.appendLocked("SET", key, value)
 }
 
 func (s *Store) Delete(keys ...string) int {
@@ -48,14 +55,17 @@ func (s *Store) Delete(keys ...string) int {
 	defer s.mu.Unlock()
 
 	now := s.now()
-	deleted := 0
+	var deleted []string
 	for _, key := range keys {
 		if _, ok := s.getLocked(key, now); ok {
 			delete(s.data, key)
-			deleted++
+			deleted = append(deleted, key)
 		}
 	}
-	return deleted
+	if len(deleted) > 0 {
+		s.appendLocked(append([]string{"DEL"}, deleted...)...)
+	}
+	return len(deleted)
 }
 
 func (s *Store) Expire(key string, ttl time.Duration) bool {
@@ -129,6 +139,7 @@ func (s *Store) expireAtLocked(key string, at, now time.Time) bool {
 	if !ok {
 		return false
 	}
+	s.appendLocked("PEXPIREAT", key, strconv.FormatInt(at.UnixMilli(), 10))
 	if !now.Before(at) {
 		delete(s.data, key)
 		return true
@@ -136,4 +147,10 @@ func (s *Store) expireAtLocked(key string, at, now time.Time) bool {
 	e.expiresAt = at
 	s.data[key] = e
 	return true
+}
+
+func (s *Store) appendLocked(args ...string) {
+	if s.aof != nil {
+		s.aof.Append(args...)
+	}
 }

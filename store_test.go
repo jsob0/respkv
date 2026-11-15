@@ -366,3 +366,76 @@ func assertStoredKeys(t *testing.T, s *Store, want ...string) {
 		t.Errorf("stored keys = %q, want %q", got, want)
 	}
 }
+
+type recordingAppender struct {
+	records [][]string
+}
+
+func (r *recordingAppender) Append(args ...string) {
+	r.records = append(r.records, slices.Clone(args))
+}
+
+func TestStoreAppendsWrites(t *testing.T) {
+	s, advance := newStoreWithClock()
+	rec := &recordingAppender{}
+	s.aof = rec
+
+	s.Set("a", "1")
+	s.Set("b", "2")
+	s.Set("c", "3")
+	s.Get("a")
+	s.TTL("a")
+	s.Expire("a", 1500*time.Millisecond)
+	s.Expire("missing", time.Second)
+	s.ExpireAt("b", time.Unix(1_000_100, 0))
+	s.Expire("c", 0)
+	s.Delete("a", "missing", "b", "a")
+	s.Delete("missing")
+	s.Set("d", "4")
+	s.Expire("d", time.Second)
+	advance(time.Second)
+	s.Delete("d")
+	s.Expire("d", time.Second)
+	s.DeleteExpired()
+
+	want := [][]string{
+		{"SET", "a", "1"},
+		{"SET", "b", "2"},
+		{"SET", "c", "3"},
+		{"PEXPIREAT", "a", "1000001500"},
+		{"PEXPIREAT", "b", "1000100000"},
+		{"PEXPIREAT", "c", "1000000000"},
+		{"DEL", "a", "b"},
+		{"SET", "d", "4"},
+		{"PEXPIREAT", "d", "1000001000"},
+	}
+	if !slices.EqualFunc(rec.records, want, slices.Equal) {
+		t.Errorf("records = %q, want %q", rec.records, want)
+	}
+}
+
+func TestStoreAppendsInApplyOrder(t *testing.T) {
+	const goroutines, iterations = 10, 100
+
+	s := NewStore()
+	rec := &recordingAppender{}
+	s.aof = rec
+
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Go(func() {
+			for i := range iterations {
+				s.Set("key", strconv.Itoa(g*iterations+i))
+			}
+		})
+	}
+	wg.Wait()
+
+	if got := len(rec.records); got != goroutines*iterations {
+		t.Fatalf("records = %d, want %d", got, goroutines*iterations)
+	}
+	last := rec.records[len(rec.records)-1]
+	if got, _ := s.Get("key"); last[2] != got {
+		t.Errorf("last record value = %q, stored value = %q", last[2], got)
+	}
+}
