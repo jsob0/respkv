@@ -220,6 +220,43 @@ go tool pprof -http :8080 'http://127.0.0.1:9100/debug/pprof/profile?seconds=10'
 The endpoint has no authentication, so keep it on `127.0.0.1` or a private
 network.
 
+## Performance
+
+Measured with `redis-benchmark` from the `redis:7` image: 50 clients, 100,000
+random keys, 64-byte values, with and without pipelining 16 commands. Requests
+per second:
+
+```bash
+docker run --rm --network host redis:7 redis-benchmark -p 9000 \
+  -t set,get -n 1000000 -c 50 -r 100000 -d 64 -P 16 -q
+```
+
+| Server                        | SET     | GET     | SET, pipelined | GET, pipelined |
+|-------------------------------|---------|---------|----------------|----------------|
+| respkv                        | 241,000 | 257,000 | 1,420,000      | 2,690,000      |
+| respkv, AOF `everysec`        | 236,000 | 256,000 | 564,000        | 2,540,000      |
+| Redis 7                       | 288,000 | 307,000 | 1,890,000      | 2,020,000      |
+| Redis 7, AOF `everysec`       | 298,000 | 307,000 | 1,090,000      | 1,990,000      |
+
+Machine: AMD Ryzen AI 7 PRO 350 (8 cores, 16 threads), Linux, Go 1.27.3,
+power profile `balanced`, client and server on the same host over loopback,
+append-only file on an SSD with btrfs. Redis ran in Docker with `--save ''`.
+
+Without pipelining, both servers spend most of the time on the network round
+trip and system calls. With pipelining, respkv reads run on all cores, so
+pipelined `GET` is faster than in Redis, which executes commands on one thread.
+Writes take the store lock and, with the append-only file, also encode the
+record while holding it. A CPU profile under pipelined `SET` with the
+append-only file showed the process using less than two cores. That makes
+writes the slowest case.
+
+Go benchmarks cover the parser, reply encoding, commands, the store under
+parallel load, append-only file writes and the whole server over TCP:
+
+```bash
+go test -run '^$' -bench . -benchmem
+```
+
 ## Testing
 
 ```bash
@@ -256,7 +293,7 @@ go test -fuzz=FuzzReadCommandRoundTrip -fuzztime=30s
 - [x] Key expiration (TTL)
 - [x] RESP protocol, compatible with `redis-cli`
 - [x] Persistence with an append-only file
-- [ ] Metrics, profiling and benchmarks
+- [x] Metrics, profiling and benchmarks
 - [ ] Docker image and TLS
 
 ## License
