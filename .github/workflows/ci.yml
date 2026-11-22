@@ -30,6 +30,12 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: WebAssembly
+        run: |
+          GOOS=js GOARCH=wasm go vet ./...
+          PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+          GOOS=js GOARCH=wasm go build -o /dev/null .
+
   docker:
     runs-on: ubuntu-latest
     steps:

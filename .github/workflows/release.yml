@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: |
+          go test ./...
+          PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+
+      - name: Build
+        run: |
+          mkdir dist
+          GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o dist/respkv.wasm .
+          cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" dist/
+          cd dist && sha256sum respkv.wasm wasm_exec.js > SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
+          fi
