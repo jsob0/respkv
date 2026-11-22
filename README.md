@@ -328,6 +328,16 @@ cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" .
 `wasm_exec.js` must come from the same Go version that built `respkv.wasm`. The
 module is about 2.7 MB, or 0.8 MB with gzip.
 
+Every `v*` tag pushed to GitHub attaches both files and their `SHA256SUMS` to
+the release of that tag, creating the release if it does not exist yet. GitHub
+serves release downloads without CORS headers, so download them when building
+the site rather than fetching them from the browser:
+
+```bash
+curl -fsSLO https://github.com/jsob0/respkv/releases/latest/download/respkv.wasm
+curl -fsSLO https://github.com/jsob0/respkv/releases/latest/download/wasm_exec.js
+```
+
 The module defines a global `respkv.exec(line)`. It takes one line typed as in
 `redis-cli` and returns `null` for a blank line, or an object with the reply
 formatted like `redis-cli` (`text`) and encoded as RESP (`resp`):
