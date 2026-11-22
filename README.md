@@ -25,6 +25,7 @@ and `TTL`.
 - [Persistence](#persistence)
 - [TLS](#tls)
 - [Metrics and profiling](#metrics-and-profiling)
+- [WebAssembly](#webassembly)
 - [Performance](#performance)
 - [Design](#design)
 - [Testing](#testing)
@@ -66,6 +67,7 @@ Operations:
 - Structured JSON logging with `log/slog`
 - Docker image with a static binary on a distroless base, running as a non-root
   user
+- WebAssembly build of the store and commands for running in a browser
 - Unit, integration and fuzz tests; CI runs them with the race detector and
   checks the Docker image
 
@@ -311,6 +313,45 @@ go tool pprof -http :8080 'http://127.0.0.1:9100/debug/pprof/profile?seconds=10'
 The endpoint has no authentication, so keep it on `127.0.0.1` or a private
 network.
 
+## WebAssembly
+
+The store and commands also compile to WebAssembly, for example for an
+in-browser playground. The browser build has no network server, persistence,
+TLS or metrics: it keeps one in-memory store per page and runs inline commands
+against it, with the same replies and key expiration as the server.
+
+```bash
+GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o respkv.wasm .
+cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" .
+```
+
+`wasm_exec.js` must come from the same Go version that built `respkv.wasm`. The
+module is about 2.7 MB, or 0.8 MB with gzip.
+
+The module defines a global `respkv.exec(line)`. It takes one line typed as in
+`redis-cli` and returns `null` for a blank line, or an object with the reply
+formatted like `redis-cli` (`text`) and encoded as RESP (`resp`):
+
+```js
+import "./wasm_exec.js";
+
+const go = new Go();
+const { instance } = await WebAssembly.instantiateStreaming(
+  fetch("/respkv.wasm"),
+  go.importObject,
+);
+go.run(instance);
+
+respkv.exec("SET greeting hello"); // { text: "OK", resp: "+OK\r\n" }
+respkv.exec("GET greeting");       // { text: "\"hello\"", resp: "$5\r\nhello\r\n" }
+respkv.exec("TTL greeting");       // { text: "(integer) -1", resp: ":-1\r\n" }
+```
+
+Do not `await` `go.run`: its promise resolves only when the Go program exits,
+and the program keeps running to remove expired keys. `respkv` is defined as
+soon as `go.run` returns. As with inline commands sent to the server, arguments
+are split on whitespace and quotes are not supported.
+
 ## Performance
 
 Measured with `redis-benchmark` from the `redis:7` image: 50 clients, 100,000
@@ -350,18 +391,23 @@ go test -run '^$' -bench . -benchmem
 
 ## Design
 
-All code is in one `main` package:
+All code is in one `main` package. Files that need a network or the file system
+for the server (`main.go`, `server.go`, `metrics.go`, `tls.go`) carry the
+`!js` build constraint, and `main_js.go` replaces `main.go` in the WebAssembly
+build:
 
-| File          | Responsibility                                                         |
-|---------------|------------------------------------------------------------------------|
-| `main.go`     | Flags, logger and signal handling                                      |
-| `server.go`   | Listener, one goroutine per connection, timeouts and graceful shutdown |
-| `resp.go`     | RESP parser and reply encoding                                         |
-| `commands.go` | Command table and argument checks                                      |
-| `store.go`    | Map behind a `sync.RWMutex`, key expiration and the AOF hook           |
-| `aof.go`      | Append-only file writer, fsync policies and replay on startup          |
-| `metrics.go`  | Prometheus metrics and `pprof` handlers                                |
-| `tls.go`      | TLS configuration                                                      |
+| File            | Responsibility                                                          |
+|-----------------|-------------------------------------------------------------------------|
+| `main.go`       | Flags, logger and signal handling                                       |
+| `server.go`     | Listener, one goroutine per connection, timeouts and graceful shutdown  |
+| `resp.go`       | RESP parser and reply encoding                                          |
+| `commands.go`   | Command table and argument checks                                       |
+| `store.go`      | Map behind a `sync.RWMutex`, key expiration and the AOF hook            |
+| `aof.go`        | Append-only file writer, fsync policies and replay on startup           |
+| `metrics.go`    | Prometheus metrics and `pprof` handlers                                 |
+| `tls.go`        | TLS configuration                                                       |
+| `playground.go` | Inline commands and `redis-cli` style replies for the WebAssembly build |
+| `main_js.go`    | WebAssembly entry point exposing `respkv.exec` to JavaScript            |
 
 The path of a command: the connection goroutine reads it with a
 `bufio.Reader`, looks it up in the command table and runs it against the store.
@@ -389,6 +435,12 @@ fsync errors, truncated last records and corrupt files. Metrics tests read
 the `/metrics` output after real client sessions and cover the `pprof` handlers.
 TLS tests generate a self-signed certificate at runtime and talk to the server
 through `crypto/tls`.
+
+Tests that do not need the server also run as WebAssembly under Node.js:
+
+```bash
+PATH="$(go env GOROOT)/lib/wasm:$PATH" GOOS=js GOARCH=wasm go test ./...
+```
 
 The parser also has fuzz tests:
 
